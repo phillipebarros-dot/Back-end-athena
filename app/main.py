@@ -93,6 +93,28 @@ app.add_middleware(
 
 AUTH_TOKEN = settings.mcp.auth_token  # Reutiliza o mesmo token do MCP
 
+from collections import defaultdict
+RATE_LIMIT = 100
+RATE_LIMIT_WINDOW = 60
+rate_limit_records = defaultdict(list)
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    """Limita a taxa de requisições por IP."""
+    if request.url.path in {"/health", "/docs", "/openapi.json"}:
+        return await call_next(request)
+        
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    
+    rate_limit_records[client_ip] = [t for t in rate_limit_records[client_ip] if now - t < RATE_LIMIT_WINDOW]
+    
+    if len(rate_limit_records[client_ip]) >= RATE_LIMIT:
+        return JSONResponse(status_code=429, content={"detail": "Too Many Requests"})
+        
+    rate_limit_records[client_ip].append(now)
+    return await call_next(request)
+
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
