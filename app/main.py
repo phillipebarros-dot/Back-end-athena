@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import hmac
 import os
 import time
 
@@ -103,7 +104,7 @@ async def auth_middleware(request: Request, call_next):
     api_key = request.headers.get("x-api-key", "")
     token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else api_key
 
-    if not token or token != AUTH_TOKEN:
+    if not token or not hmac.compare_digest(token, AUTH_TOKEN):
         return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
 
     return await call_next(request)
@@ -395,8 +396,14 @@ async def audit(request: AuditRequest):
 
     Substitui: Webhook Auditoria → Validar Admin → Roteador → BQ Query → Formatar → Resposta.
     """
-    # Validação admin server-side
-    if request.user_email not in settings.security.admin_emails:
+    # Validação admin server-side — consulta athena_users.role no BigQuery
+    # Fallback: se BQ falhar, usa lista hardcoded da env var
+    from app.services.bq_service import get_bq_service as _get_bq
+    try:
+        _is_admin = _get_bq().is_admin(request.user_email)
+    except Exception:
+        _is_admin = request.user_email in settings.security.admin_emails
+    if not _is_admin:
         raise HTTPException(status_code=403, detail="Acesso administrativo negado.")
 
     from app.services.bq_service import get_bq_service
@@ -425,6 +432,76 @@ async def audit(request: AuditRequest):
         data = {"message": f"Query '{query}' não suportada. Use: kpis, recent_activity, recent_feedback, top_users, all_conversations, conversation_messages."}
 
     return {"query": query, "data": data}
+
+
+# ============================================================================
+# POST /users — Gerenciamento de usuários (RBAC)
+# ============================================================================
+
+@app.post("/users")
+async def users(request: Request):
+    """CRUD de usuários — athena_users no BigQuery.
+
+    Actions:
+      - list: lista todos os usuários
+      - upsert: cria/atualiza usuário (chamado no login OAuth)
+      - update_role: muda role de um usuário (só admin)
+      - check: verifica se email é admin
+    """
+    from app.services.bq_service import get_bq_service
+    bq = get_bq_service()
+
+    body = await request.json()
+    action = body.get("action", "")
+
+    if action == "list":
+        # Só admin pode listar usuários
+        caller_email = body.get("user_email", "")
+        try:
+            caller_is_admin = bq.is_admin(caller_email)
+        except Exception:
+            caller_is_admin = caller_email in settings.security.admin_emails
+        if not caller_is_admin:
+            raise HTTPException(status_code=403, detail="Acesso administrativo negado.")
+        data = bq.list_users()
+        return {"users": data}
+
+    elif action == "upsert":
+        # Chamado no login — cria usuário se não existe, atualiza last_login se existe
+        result = bq.upsert_user(
+            google_sub=body.get("google_sub", ""),
+            email=body.get("email", ""),
+            nome=body.get("nome"),
+            avatar_url=body.get("avatar_url"),
+        )
+        return {"success": True, **result}
+
+    elif action == "update_role":
+        # Só admin pode mudar roles
+        caller_email = body.get("user_email", "")
+        try:
+            caller_is_admin = bq.is_admin(caller_email)
+        except Exception:
+            caller_is_admin = caller_email in settings.security.admin_emails
+        if not caller_is_admin:
+            raise HTTPException(status_code=403, detail="Acesso administrativo negado.")
+        target_email = body.get("target_email", "")
+        new_role = body.get("role", "user")
+        if not target_email:
+            raise HTTPException(status_code=400, detail="target_email obrigatório.")
+        bq.update_user_role(target_email, new_role)
+        return {"success": True, "email": target_email, "role": new_role}
+
+    elif action == "check":
+        # Verifica se email é admin — usado pelo frontend no login
+        email = body.get("email", "")
+        user = bq.get_user_by_email(email)
+        if user:
+            return {"exists": True, "role": user.get("role", "user"), "nome": user.get("nome", "")}
+        return {"exists": False, "role": "user"}
+
+    else:
+        raise HTTPException(status_code=400, detail=f"Action '{action}' não suportada. Use: list, upsert, update_role, check.")
 
 
 # ============================================================================

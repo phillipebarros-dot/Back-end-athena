@@ -59,7 +59,7 @@ class BigQueryService:
         rnd = f"{random.randint(0, 4095):03x}"
         return f"{prefix}{ts}_{rnd}"
 
-    def _query(self, sql: str, params: list[bigquery.ScalarQueryParameter] | None = None) -> list[dict]:
+    def _query(self, sql: str, params: list[bigquery.QueryParameter] | None = None) -> list[dict]:
         """Executa query e retorna lista de dicts."""
         job_config = bigquery.QueryJobConfig()
         if params:
@@ -71,7 +71,7 @@ class BigQueryService:
             logger.error("BigQueryService query error: %s | sql: %s", e, sql[:200])
             raise
 
-    def _execute(self, sql: str, params: list[bigquery.ScalarQueryParameter] | None = None) -> None:
+    def _execute(self, sql: str, params: list[bigquery.QueryParameter] | None = None) -> None:
         """Executa DML (INSERT/UPDATE) sem retorno."""
         job_config = bigquery.QueryJobConfig()
         if params:
@@ -353,13 +353,13 @@ class BigQueryService:
         """
         if not message_ids:
             return
-        ids_str = ", ".join(f"'{mid}'" for mid in message_ids)
         sql = f"""
             UPDATE {self._table(settings.persistence.table_messages)}
             SET is_compacted = TRUE
-            WHERE message_id IN ({ids_str})
+            WHERE message_id IN UNNEST(@ids)
         """
-        self._execute(sql)
+        params = [bigquery.ArrayQueryParameter("ids", "STRING", message_ids)]
+        self._execute(sql, params)
 
     # =========================================================================
     # Auditoria
@@ -532,6 +532,106 @@ class BigQueryService:
             WHERE status = 'active'
             ORDER BY created_at DESC
             LIMIT 20
+        """
+        return self._query(sql)
+
+    # =========================================================================
+    # Users (RBAC via athena_users)
+    # =========================================================================
+
+    def get_user_by_email(self, email: str) -> dict | None:
+        """Busca usuário pelo email. Retorna None se não existe."""
+        sql = f"""
+            SELECT google_sub, email, nome, avatar_url, departamento, role,
+                   created_at, last_login
+            FROM {self._table('athena_users')}
+            WHERE email = @email
+            LIMIT 1
+        """
+        params = [bigquery.ScalarQueryParameter("email", "STRING", email.lower())]
+        rows = self._query(sql, params)
+        return rows[0] if rows else None
+
+    def is_admin(self, email: str) -> bool:
+        """Verifica se o usuário tem role 'admin' na athena_users.
+
+        Fallback: se o usuário não existe na tabela, retorna False.
+        """
+        user = self.get_user_by_email(email)
+        if user is None:
+            return False
+        return user.get("role") == "admin"
+
+    def upsert_user(
+        self,
+        google_sub: str,
+        email: str,
+        nome: str | None = None,
+        avatar_url: str | None = None,
+    ) -> dict:
+        """Cria ou atualiza usuário no login.
+
+        Se o email já existe, atualiza google_sub, nome, avatar e last_login.
+        Se não existe, insere com role='user' (default da tabela).
+        """
+        email_lower = email.lower()
+        existing = self.get_user_by_email(email_lower)
+
+        if existing:
+            # UPDATE — atualiza dados do Google e last_login
+            sql = f"""
+                UPDATE {self._table('athena_users')}
+                SET google_sub = @sub, nome = @nome, avatar_url = @avatar,
+                    last_login = CURRENT_TIMESTAMP()
+                WHERE email = @email
+            """
+            params = [
+                bigquery.ScalarQueryParameter("sub", "STRING", google_sub),
+                bigquery.ScalarQueryParameter("nome", "STRING", nome or existing.get("nome", "")),
+                bigquery.ScalarQueryParameter("avatar", "STRING", avatar_url or existing.get("avatar_url", "")),
+                bigquery.ScalarQueryParameter("email", "STRING", email_lower),
+            ]
+            self._execute(sql, params)
+            return {"action": "updated", "email": email_lower, "role": existing.get("role", "user")}
+        else:
+            # INSERT — novo usuário com role default 'user'
+            sql = f"""
+                INSERT INTO {self._table('athena_users')}
+                (google_sub, email, nome, avatar_url, role, last_login)
+                VALUES (@sub, @email, @nome, @avatar, 'user', CURRENT_TIMESTAMP())
+            """
+            params = [
+                bigquery.ScalarQueryParameter("sub", "STRING", google_sub),
+                bigquery.ScalarQueryParameter("email", "STRING", email_lower),
+                bigquery.ScalarQueryParameter("nome", "STRING", nome or ""),
+                bigquery.ScalarQueryParameter("avatar", "STRING", avatar_url or ""),
+            ]
+            self._execute(sql, params)
+            return {"action": "created", "email": email_lower, "role": "user"}
+
+    def update_user_role(self, email: str, role: str) -> bool:
+        """Atualiza o role de um usuário. Só admin pode chamar (validado no endpoint)."""
+        if role not in ("admin", "user"):
+            raise ValueError(f"Role '{role}' inválido. Use 'admin' ou 'user'.")
+        sql = f"""
+            UPDATE {self._table('athena_users')}
+            SET role = @role
+            WHERE email = @email
+        """
+        params = [
+            bigquery.ScalarQueryParameter("role", "STRING", role),
+            bigquery.ScalarQueryParameter("email", "STRING", email.lower()),
+        ]
+        self._execute(sql, params)
+        return True
+
+    def list_users(self) -> list[dict]:
+        """Lista todos os usuários cadastrados."""
+        sql = f"""
+            SELECT email, nome, departamento, role, created_at, last_login
+            FROM {self._table('athena_users')}
+            ORDER BY created_at DESC
+            LIMIT 200
         """
         return self._query(sql)
 

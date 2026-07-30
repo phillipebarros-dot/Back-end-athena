@@ -225,19 +225,42 @@ async def build_agent(
 
 
 # ============================================================================
-# Instância global do agente (lazy init)
+# Instância do agente — per-client com Lock (thread-safe)
+#
+# FIX CRÍTICO: o singleton antigo compartilhava o MESMO agente (com o MESMO
+# system prompt) entre todos os requests, independente do cliente.
+# Resultado: respostas cruzadas entre usuários e travamento quando dois
+# requests chegavam ao mesmo tempo.
+#
+# Agora: um agente por cliente, protegido por asyncio.Lock.
 # ============================================================================
 
-_agent_instance = None
+import asyncio
+
+_agent_cache: dict[str, Any] = {}  # cliente → agente compilado
+_agent_lock = asyncio.Lock()
 
 
 async def get_agent(tools: list[Any] | None = None, cliente: str | None = None):
-    """Retorna a instância do agente (singleton lazy).
+    """Retorna o agente para o cliente solicitado (cache por cliente).
 
-    Em produção, o agente é criado uma vez e reutilizado.
-    O cliente pode ser trocado por request via config do thread.
+    - Se o cliente mudou, cria um novo agente com o system prompt correto.
+    - asyncio.Lock impede race conditions entre requests simultâneos.
+    - Cada agente tem seu próprio checkpointer, evitando contaminação.
     """
-    global _agent_instance
-    if _agent_instance is None:
-        _agent_instance = await build_agent(local_tools=tools, cliente=cliente)
-    return _agent_instance
+    cache_key = (cliente or "__default__").lower()
+
+    # Fast path — agente já existe para este cliente
+    if cache_key in _agent_cache:
+        return _agent_cache[cache_key]
+
+    # Slow path — criar agente (protegido por Lock)
+    async with _agent_lock:
+        # Double-check: outra coroutine pode ter criado enquanto esperávamos
+        if cache_key in _agent_cache:
+            return _agent_cache[cache_key]
+
+        logger.info("Criando agente para cliente=%s (total em cache: %d)", cache_key, len(_agent_cache))
+        agent = await build_agent(local_tools=tools, cliente=cliente)
+        _agent_cache[cache_key] = agent
+        return agent
