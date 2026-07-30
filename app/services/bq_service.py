@@ -41,8 +41,9 @@ class BigQueryService:
     @property
     def client(self) -> bigquery.Client:
         if self._client is None:
-            # Persistência usa projeto diferente (sheetsintegration-451500)
-            self._client = bigquery.Client(project=settings.bq.project_persistence)
+            # Cria os jobs (compute/billing) no projeto principal (athenaai-opus)
+            # As tabelas ainda serão acessadas no projeto de persistência via _table()
+            self._client = bigquery.Client(project=settings.bq.project_id)
         return self._client
 
     def _table(self, name: str) -> str:
