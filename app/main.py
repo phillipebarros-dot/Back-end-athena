@@ -1,0 +1,491 @@
+"""
+FastAPI Application — Backend da Athena v3.
+
+Substitui os 7 webhooks do n8n + todo o fluxo de orquestração.
+Deploy: Cloud Run (mesma infra dos MCPs do Camilo).
+
+Endpoints equivalentes aos webhooks n8n:
+  POST /chat              ← When chat message received
+  POST /conversations     ← Webhook Conversas (list/create/updateTitle)
+  POST /history           ← Webhook Historico
+  POST /save-message      ← Webhook Salvar Mensagem
+  POST /compact           ← Webhook Compactacao
+  POST /feedback          ← Webhook Feedback
+  POST /audit             ← Webhook Auditoria
+  POST /tts               ← Webhook TTS
+  POST /export            ← Webhook Export Sheets
+  GET  /health            ← Health check (novo)
+"""
+
+from __future__ import annotations
+
+import base64
+import logging
+import os
+import time
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from app.config import settings
+from app.models import (
+    AuditRequest,
+    ChatRequest,
+    ChatResponse,
+    CompactRequest,
+    ConversationAction,
+    ConversationRequest,
+    ExportRequest,
+    FeedbackRequest,
+    HistoryRequest,
+    ProvenanceSource,
+    SaveMessageRequest,
+    TTSRequest,
+    TTSResponse,
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# ============================================================================
+# App
+# ============================================================================
+
+app = FastAPI(
+    title="Athena Backend",
+    description="Backend Python da Athena — agente LLM de mídia e planejamento",
+    version="3.0.0",
+    docs_url="/docs" if settings.debug else None,  # Swagger só em dev
+    redoc_url=None,
+)
+
+# CORS — restrito ao frontend da Athena (configura via env var)
+_cors_raw = os.getenv("CORS_ALLOWED_ORIGINS", "")
+CORS_ORIGINS = [o.strip() for o in _cors_raw.split(",") if o.strip()] if _cors_raw else []
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["POST", "GET", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "x-api-key"],
+)
+
+
+# ============================================================================
+# Auth Middleware — equivalente ao httpHeaderAuth do n8n
+# ============================================================================
+
+AUTH_TOKEN = settings.mcp.auth_token  # Reutiliza o mesmo token do MCP
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    """Valida header de autenticação.
+
+    Equivale ao httpHeaderAuth do n8n (Webhook Entrada Chat).
+    Endpoints /health e /docs são públicos.
+    """
+    public_paths = {"/health", "/docs", "/openapi.json"}
+    if request.url.path in public_paths:
+        return await call_next(request)
+
+    # Em modo debug, aceita qualquer request
+    if settings.debug:
+        return await call_next(request)
+
+    # Verifica Bearer token ou x-api-key
+    auth_header = request.headers.get("authorization", "")
+    api_key = request.headers.get("x-api-key", "")
+    token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else api_key
+
+    if not token or token != AUTH_TOKEN:
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+
+    return await call_next(request)
+
+
+# ============================================================================
+# Health Check
+# ============================================================================
+
+@app.get("/health")
+async def health():
+    """Health check para Cloud Run."""
+    return {"status": "ok", "version": "3.0.0"}
+
+
+# ============================================================================
+# POST /chat — Substitui o fluxo principal do n8n
+# (chatTrigger → Sanitizador → Agent → Validador → TTS → Resposta → Log)
+# ============================================================================
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """Endpoint principal de chat.
+
+    O Pydantic (ChatRequest) já sanitiza a entrada — substitui o node
+    "Sanitizador de Entrada" do n8n.
+    """
+    start_time = time.time()
+
+    try:
+        # Import lazy para não travar o startup
+        from app.agent.graph import get_agent
+        from app.agent.tools import get_all_tools
+        from app.services.response_validator import validate_response
+
+        tools = get_all_tools()
+        agent = await get_agent(tools=tools, cliente=request.client)
+
+        # Config do thread — identifica a conversa para o checkpointer
+        config = {"configurable": {"thread_id": request.conversation_id}}
+
+        # Invoca o agente
+        result = await agent.ainvoke(
+            {"messages": [("user", request.message)]},
+            config=config,
+        )
+
+        # Extrai a resposta do agente (última mensagem do assistant)
+        raw_output = result["messages"][-1].content
+
+        # Validador de Resposta — equivalente ao node do n8n
+        validated = validate_response(raw_output)
+        output = validated["output"]
+        attachment = validated.get("attachment")
+
+        # ── Proveniência: extrai queries, tabelas e fontes das tool calls ──
+        sources, queries, tables = [], [], []
+        for m in result["messages"]:
+            # SQL nas chamadas de tool (BigQuery / MCP)
+            for tc in (getattr(m, "tool_calls", None) or []):
+                args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                sql = args.get("sql") or args.get("query")
+                if sql:
+                    queries.append(sql)
+                tbl = args.get("table") or args.get("dataset")
+                if tbl:
+                    tables.append(tbl)
+            # Nome da tool executada vira fonte
+            name = getattr(m, "name", None)
+            if name:
+                sources.append(name)
+
+        latency_ms = int((time.time() - start_time) * 1000)
+        logger.info(
+            "Chat processado: user=%s, conv=%s, client=%s, latency=%dms, sources=%s",
+            request.user_id,
+            request.conversation_id,
+            request.client,
+            latency_ms,
+            sources,
+        )
+
+        # Registrador de Requisicao — equivalente ao node BQ INSERT do n8n
+        try:
+            from app.services.bq_service import get_bq_service
+            bq = get_bq_service()
+            bq.insert_log(
+                session_id=request.conversation_id,
+                user_input=request.message,
+                agent_response=output,
+                latency_ms=latency_ms,
+            )
+        except Exception as log_err:
+            logger.warning("Falha ao registrar log: %s", log_err)
+
+        # TTS inline — equivalente aos nodes "Is Audio Request?" → "OpenAI TTS" → "Encode Audio Chat"
+        audio_b64 = None
+        if request.is_audio:
+            try:
+                import openai
+                tts_client = openai.OpenAI(api_key=settings.tts.openai_api_key)
+                tts_response = tts_client.audio.speech.create(
+                    model=settings.tts.model,
+                    voice=settings.tts.voice,
+                    input=output[:5000],  # Limita texto para TTS
+                )
+                audio_b64 = base64.b64encode(tts_response.content).decode("utf-8")
+            except Exception as tts_err:
+                logger.warning("Falha no TTS inline: %s", tts_err)
+
+        return ChatResponse(
+            output=output,
+            conversation_id=request.conversation_id,
+            latency_ms=latency_ms,
+            attachment=attachment,
+            audio=audio_b64,
+            query="\n\n".join(dict.fromkeys(queries)) or None,
+            tables=list(dict.fromkeys(tables)) or None,
+            sources=[ProvenanceSource(label=s) for s in dict.fromkeys(sources)] or None,
+        )
+
+    except Exception as e:
+        logger.error("Erro no chat: %s", e, exc_info=True)
+        latency_ms = int((time.time() - start_time) * 1000)
+        return ChatResponse(
+            output="Desculpe, ocorreu um erro ao processar sua consulta. Tente novamente.",
+            conversation_id=request.conversation_id,
+            latency_ms=latency_ms,
+        )
+
+
+# ============================================================================
+# POST /conversations — Substitui o Webhook Conversas do n8n (14 nodes)
+# ============================================================================
+
+@app.post("/conversations")
+async def conversations(request: ConversationRequest):
+    """CRUD de conversas.
+
+    Substitui: Webhook Conversas → Sanitizar → Acao Listar? → BQ Listar →
+    Formatar → Resposta (e variantes Create/UpdateTitle).
+    """
+    from app.services.bq_service import get_bq_service
+    bq = get_bq_service()
+
+    if request.action == ConversationAction.LIST:
+        convs = bq.list_conversations(request.user_id)
+        return {"conversations": convs}
+
+    elif request.action == ConversationAction.CREATE:
+        if not request.conversation_id:
+            raise HTTPException(status_code=400, detail="conversation_id é obrigatório para criação.")
+        result = bq.create_conversation(
+            user_id=request.user_id,
+            conversation_id=request.conversation_id,
+            title=request.title or "Nova conversa",
+        )
+        return {"success": True, "action": "create", **result}
+
+    elif request.action == ConversationAction.UPDATE_TITLE:
+        if not request.conversation_id or not request.title:
+            raise HTTPException(status_code=400, detail="conversation_id e title são obrigatórios.")
+        bq.update_title(request.conversation_id, request.title)
+        return {"success": True}
+
+
+# ============================================================================
+# POST /history — Substitui o Webhook Historico do n8n (5 nodes)
+# ============================================================================
+
+@app.post("/history")
+async def history(request: HistoryRequest):
+    """Carrega histórico de mensagens de uma conversa.
+
+    Substitui: Webhook Historico → Sanitizar → BQ Carregar → Formatar → Resposta.
+    """
+    from app.services.bq_service import get_bq_service
+    bq = get_bq_service()
+    messages = bq.load_history(request.conversation_id, request.limit)
+    return {"messages": messages}
+
+
+# ============================================================================
+# POST /save-message — Substitui o Webhook Salvar Mensagem do n8n (5 nodes)
+# ============================================================================
+
+@app.post("/save-message")
+async def save_message(request: SaveMessageRequest):
+    """Salva uma mensagem individual.
+
+    Substitui: Webhook Salvar → Sanitizar → BQ Inserir → BQ Atualizar Contagem → Resposta.
+    """
+    from app.services.bq_service import get_bq_service
+    bq = get_bq_service()
+    result = bq.save_message(
+        conversation_id=request.conversation_id,
+        user_id=request.user_id,
+        role=request.role,
+        content=request.content,
+    )
+    return {"success": True, **result}
+
+
+# ============================================================================
+# POST /compact — Substitui o Webhook Compactacao do n8n (12 nodes)
+# ============================================================================
+
+@app.post("/compact")
+async def compact(request: CompactRequest):
+    """Compacta mensagens antigas de uma conversa.
+
+    Substitui: Webhook Compactacao → Config → BQ Contar → Verificar Limite →
+    BQ Carregar Antigas → Montar Transcricao → Sumarizar (Haiku) →
+    BQ Salvar Resumo → BQ Marcar Compactadas → Resposta.
+    """
+    from app.services.bq_service import get_bq_service
+    bq = get_bq_service()
+
+    # Verificar limite
+    count = bq.count_active_messages(request.conversation_id)
+    if count <= request.threshold:
+        return {"compacted": False, "reason": f"Apenas {count} mensagens ativas (limite: {request.threshold})."}
+
+    # Carregar mensagens antigas
+    old_msgs = bq.load_old_messages(request.conversation_id, request.keep_recent)
+    if not old_msgs:
+        return {"compacted": False, "reason": "Nenhuma mensagem antiga para compactar."}
+
+    # Montar transcrição
+    transcription = "\n".join(
+        f"[{m['role']}]: {m['content']}" for m in old_msgs
+    )
+
+    # Sumarizar com Haiku
+    try:
+        from app.agent.graph import _build_summarizer_llm
+        haiku = _build_summarizer_llm()
+        summary_result = haiku.invoke(
+            f"Resuma a seguinte conversa em português, mantendo os pontos principais, "
+            f"dados mencionados e decisões tomadas. Seja conciso mas completo:\n\n{transcription}"
+        )
+        summary = summary_result.content
+    except Exception as e:
+        logger.error("Erro na sumarização: %s", e)
+        return {"compacted": False, "reason": f"Erro na sumarização: {e}"}
+
+    # Salvar resumo e marcar compactadas
+    bq.save_summary(request.conversation_id, "system", summary)
+    bq.mark_compacted([m["message_id"] for m in old_msgs])
+
+    return {
+        "compacted": True,
+        "messages_compacted": len(old_msgs),
+        "summary_length": len(summary),
+    }
+
+
+# ============================================================================
+# POST /feedback — Substitui o Webhook Feedback do n8n (4 nodes)
+# ============================================================================
+
+@app.post("/feedback")
+async def feedback(request: FeedbackRequest):
+    """Recebe feedback positivo/negativo por mensagem.
+
+    Substitui: Webhook Feedback → Sanitizar → BQ Inserir → Resposta.
+    """
+    from app.services.bq_service import get_bq_service
+    bq = get_bq_service()
+    bq.save_feedback(
+        user_id=request.user_id,
+        message_id=request.message_id,
+        rating=request.rating.value,
+        conversation_id=request.conversation_id or "",
+        user_query=request.user_query,
+        assistant_response=request.assistant_response,
+        comment=request.comment,
+    )
+    return {"success": True}
+
+
+# ============================================================================
+# POST /audit — Substitui o Webhook Auditoria do n8n (5 nodes)
+# ============================================================================
+
+@app.post("/audit")
+async def audit(request: AuditRequest):
+    """Métricas para dashboard admin.
+
+    Substitui: Webhook Auditoria → Validar Admin → Roteador → BQ Query → Formatar → Resposta.
+    """
+    # Validação admin server-side
+    if request.user_email not in settings.security.admin_emails:
+        raise HTTPException(status_code=403, detail="Acesso administrativo negado.")
+
+    from app.services.bq_service import get_bq_service
+    bq = get_bq_service()
+
+    query = request.query
+
+    if query == "kpis":
+        data = bq.audit_kpis()
+    elif query == "recent_activity":
+        data = bq.audit_recent_activity()
+    elif query == "recent_feedback":
+        data = bq.audit_recent_feedback()
+    elif query == "top_users":
+        data = bq.audit_top_users()
+    elif query == "all_conversations":
+        data = bq.audit_all_conversations(
+            date_from=request.date_from,
+            date_to=request.date_to,
+        )
+    elif query == "conversation_messages":
+        if not request.conversation_id:
+            raise HTTPException(status_code=400, detail="conversation_id obrigatório.")
+        data = bq.audit_conversation_messages(request.conversation_id)
+    else:
+        data = {"message": f"Query '{query}' não suportada. Use: kpis, recent_activity, recent_feedback, top_users, all_conversations, conversation_messages."}
+
+    return {"query": query, "data": data}
+
+
+# ============================================================================
+# POST /tts — Substitui o Webhook TTS do n8n (4 nodes)
+# ============================================================================
+
+@app.post("/tts", response_model=TTSResponse)
+async def tts(request: TTSRequest):
+    """Converte texto em áudio via OpenAI TTS.
+
+    Substitui: Webhook TTS → OpenAI TTS → TTS to Base64 → Respond.
+    """
+    try:
+        import openai
+
+        client = openai.OpenAI(api_key=settings.tts.openai_api_key)
+        response = client.audio.speech.create(
+            model=settings.tts.model,
+            voice=settings.tts.voice,
+            input=request.text,
+        )
+        audio_bytes = response.content
+        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+
+        # n8n retorna campo 'audio', não 'audio_base64'
+        return TTSResponse(audio=audio_b64)
+
+    except Exception as e:
+        logger.error("Erro no TTS: %s", e)
+        raise HTTPException(status_code=500, detail=f"Erro ao gerar áudio: {e}")
+
+
+# ============================================================================
+# POST /export — Substitui o Webhook Export Sheets do n8n (3 nodes)
+# ============================================================================
+
+@app.post("/export")
+async def export(request: ExportRequest):
+    """Exporta dados para Google Sheets ou CSV.
+
+    Substitui: Webhook Export → Prepare Data → Respond.
+    Usa o MCP export do Camilo (Cloud Run).
+    """
+    # TODO: Chamar MCP export via langchain-mcp-adapters
+    return {
+        "status": "pending",
+        "message": "Export via MCP ainda não implementado. Use exportar_sheets via agente.",
+        "rows": len(request.data),
+    }
+
+
+# ============================================================================
+# Entrypoint
+# ============================================================================
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "app.main:app",
+        host=settings.host,
+        port=settings.port,
+        reload=settings.debug,
+    )

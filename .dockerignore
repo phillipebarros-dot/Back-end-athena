@@ -1,0 +1,27 @@
+# secrets / env
+.env
+.env.local
+.env*.local
+*-service-account.json
+*-credentials.json
+
+# build artifacts
+*.egg-info/
+__pycache__/
+*.pyc
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# version control
+.git/
+
+# tests (not in prod image)
+test_*.py
+tests/
+
+# meta
+Dockerfile
+.dockerignore
+.gitignore
+README.md

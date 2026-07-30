@@ -1,0 +1,37 @@
+# === Secrets (NUNCA comitar) ===
+.env
+.env.local
+.env*.local
+*-service-account.json
+*-credentials.json
+
+# === Python build artifacts ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+
+# === Dev tools cache ===
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# === Virtual environments ===
+.venv/
+venv/
+env/
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === OS ===
+.DS_Store
+Thumbs.db

@@ -1,0 +1,26 @@
+# .gcloudignore for athena-backend Cloud Build
+# Refs .gitignore automatically, this adds extra exclusions
+
+.gcloudignore
+.git/
+
+# secrets
+.env
+.env.local
+*-service-account.json
+*-credentials.json
+
+# build artifacts
+*.egg-info/
+__pycache__/
+*.pyc
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# tests
+test_*.py
+tests/
+
+# docs
+README.md
