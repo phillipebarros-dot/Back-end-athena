@@ -28,6 +28,7 @@ import time
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+import traceback
 
 from app.config import settings
 from app.models import (
@@ -63,6 +64,15 @@ app = FastAPI(
     docs_url="/docs" if settings.debug else None,  # Swagger só em dev
     redoc_url=None,
 )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Global exception handler caught: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc), "type": type(exc).__name__, "trace": traceback.format_exc()}
+    )
+
 
 # CORS — restrito ao frontend da Athena (configura via env var)
 _cors_raw = os.getenv("CORS_ALLOWED_ORIGINS", "")
