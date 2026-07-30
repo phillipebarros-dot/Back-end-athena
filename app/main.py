@@ -270,6 +270,12 @@ async def conversations(request: ConversationRequest):
         bq.update_title(request.conversation_id, request.title)
         return {"success": True}
 
+    elif request.action == ConversationAction.DELETE:
+        if not request.conversation_id:
+            raise HTTPException(status_code=400, detail="conversation_id é obrigatório para deleção.")
+        bq.delete_conversation(request.conversation_id)
+        return {"success": True, "action": "delete"}
+
 
 # ============================================================================
 # POST /history — Substitui o Webhook Historico do n8n (5 nodes)
@@ -502,6 +508,22 @@ async def users(request: Request):
 
     else:
         raise HTTPException(status_code=400, detail=f"Action '{action}' não suportada. Use: list, upsert, update_role, check.")
+
+
+# ============================================================================
+# GET /list-clients — Lista clientes disponíveis para o selector do front
+# ============================================================================
+
+@app.post("/list-clients")
+async def list_clients():
+    """Retorna lista de clientes únicos da base de dados.
+
+    Usado pelo front para popular o selector de clientes.
+    """
+    from app.services.bq_service import get_bq_service
+    bq = get_bq_service()
+    clients = bq.list_clients()
+    return {"clients": clients}
 
 
 # ============================================================================

@@ -106,6 +106,7 @@ class ConversationAction(str, Enum):
     LIST = "list"
     CREATE = "create"
     UPDATE_TITLE = "updateTitle"
+    DELETE = "delete"
 
 
 class ConversationRequest(BaseModel):

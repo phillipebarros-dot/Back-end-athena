@@ -146,6 +146,56 @@ class BigQueryService:
         self._execute(sql, params)
         return True
 
+    def delete_conversation(self, conversation_id: str) -> bool:
+        """Marca uma conversa como deletada (soft delete).
+
+        Equivale ao node: BQ Deletar Conversa
+        Usa soft delete (status='deleted') para manter auditoria.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        sql = f"""
+            UPDATE {self._table(settings.persistence.table_conversations)}
+            SET status = 'deleted', updated_at = @now
+            WHERE conversation_id = @conv_id
+        """
+        params = [
+            bigquery.ScalarQueryParameter("now", "STRING", now),
+            bigquery.ScalarQueryParameter("conv_id", "STRING", conversation_id),
+        ]
+        self._execute(sql, params)
+        return True
+
+    def list_clients(self) -> list[str]:
+        """Lista clientes distintos da tabela principal de dados.
+
+        Query no projeto de dados (athenaai-opus), não no de persistência.
+        Retorna nomes únicos de clientes ativos.
+        """
+        # Usa client do projeto de dados, não o de persistência
+        data_table = f"`{settings.bq.project_id}.{settings.bq.dataset_media}.pi01`"
+        sql = f"""
+            SELECT DISTINCT UPPER(cliente) as cliente
+            FROM {data_table}
+            WHERE cliente IS NOT NULL AND TRIM(cliente) != ''
+            ORDER BY cliente
+            LIMIT 50
+        """
+        try:
+            # Precisa usar client do projeto de dados
+            job_config = bigquery.QueryJobConfig()
+            data_client = bigquery.Client(project=settings.bq.project_id)
+            result = data_client.query(sql, job_config=job_config, timeout=15)
+            rows = [dict(row) for row in result.result(timeout=15)]
+            return [r["cliente"] for r in rows if r.get("cliente")]
+        except Exception as e:
+            logger.warning("Falha ao listar clientes: %s", e)
+            # Fallback hardcoded dos clientes conhecidos (do mapa validar_cliente)
+            return [
+                "AUSTRALIAN GOLD", "BEAUTYBOX", "EUDORA",
+                "GRUPO BOTICARIO", "MULTI B", "O BOTICARIO",
+                "QUEM DISSE BERENICE", "TRUSS", "VULT",
+            ]
+
     # =========================================================================
     # Mensagens / Histórico
     # =========================================================================
