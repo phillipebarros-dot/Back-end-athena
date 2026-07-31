@@ -760,10 +760,12 @@ async def tts(request: TTSRequest):
 
 @app.post("/export")
 async def export_data(request: ExportRequest):
-    """Exporta dados para CSV ou XLSX.
+    """Exporta dados para Google Sheets, CSV ou XLSX.
 
     Substitui: Webhook Export → Prepare Data → Respond.
-    Retorna arquivo em base64 para download direto pelo front.
+    format="sheets": cria Google Sheets nativo e compartilha com user_email.
+    format="xlsx": retorna XLSX em base64.
+    format="csv": retorna CSV em base64.
     """
     import io
     import csv
@@ -775,6 +777,72 @@ async def export_data(request: ExportRequest):
 
     title = request.title or "athena_export"
     fmt = getattr(request, "format", "csv") or "csv"
+
+    # ── Google Sheets nativo ──
+    if fmt == "sheets":
+        try:
+            import gspread
+            import google.auth
+
+            # ADC do Cloud Run (service account automatica)
+            creds, project = google.auth.default(
+                scopes=[
+                    "https://www.googleapis.com/auth/spreadsheets",
+                    "https://www.googleapis.com/auth/drive",
+                ]
+            )
+            gc = gspread.authorize(creds)
+
+            # Criar planilha
+            sh = gc.create(f"Athena — {title}")
+
+            # Preparar dados
+            ws = sh.sheet1
+            ws.update_title(title[:100])
+
+            if data and isinstance(data[0], dict):
+                headers = list(data[0].keys())
+                rows = [headers] + [[str(row.get(h, "")) for h in headers] for row in data]
+            else:
+                rows = [[str(c) for c in (row if isinstance(row, list) else [row])] for row in data]
+
+            # Escrever tudo de uma vez (batch)
+            ws.update(range_name="A1", values=rows)
+
+            # Estilizar header (negrito + fundo vermelho)
+            try:
+                ws.format("1", {
+                    "backgroundColor": {"red": 0.77, "green": 0.12, "blue": 0.12},
+                    "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+                })
+            except Exception:
+                pass  # Formatacao e cosmetic, nao bloqueia
+
+            # Compartilhar com o usuario
+            if request.user_email:
+                try:
+                    sh.share(request.user_email, perm_type="user", role="writer", notify=False)
+                except Exception as e:
+                    logger.warning(f"Falha ao compartilhar com {request.user_email}: {e}")
+                    # Fallback: compartilhar com qualquer um que tenha o link
+                    try:
+                        sh.share("", perm_type="anyone", role="reader")
+                    except Exception:
+                        pass
+
+            return {
+                "status": "ok",
+                "format": "sheets",
+                "url": sh.url,
+                "title": sh.title,
+                "rows": len(data),
+            }
+        except ImportError:
+            logger.error("gspread nao instalado, fallback para XLSX")
+            fmt = "xlsx"
+        except Exception as e:
+            logger.error(f"Erro ao criar Google Sheet: {e}")
+            return {"status": "error", "message": f"Erro ao criar planilha: {str(e)}"}
 
     if fmt == "xlsx":
         try:

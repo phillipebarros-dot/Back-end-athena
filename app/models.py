@@ -272,4 +272,5 @@ class ExportRequest(BaseModel):
     """Request para POST /export."""
     data: list[dict]
     title: str = "Athena Export"
-    format: str = "sheets"  # "sheets" | "csv"
+    format: str = "sheets"  # "sheets" | "csv" | "xlsx"
+    user_email: str | None = None  # Email para compartilhar a planilha

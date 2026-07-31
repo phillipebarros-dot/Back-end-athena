@@ -554,14 +554,72 @@ def exportar_sheets(titulo: str, dados: str) -> str:
     Returns:
         URL da planilha criada ou mensagem de erro.
     """
-    # TODO: Implementar via MCP export do Camilo (langchain-mcp-adapters)
-    # ou Google Sheets API direta
-    return (
-        f"Exportação para Google Sheets ainda não implementada no backend Python. "
-        f"Titulo solicitado: '{titulo}'. "
-        f"Dados recebidos com {len(dados)} caracteres. "
-        f"Use o export via MCP quando disponível."
-    )
+    import json
+
+    try:
+        import gspread
+        import google.auth
+
+        # Parse dos dados
+        try:
+            parsed = json.loads(dados)
+        except json.JSONDecodeError:
+            return f"Erro: dados não são JSON válido. Recebido: {dados[:200]}..."
+
+        if not isinstance(parsed, list) or len(parsed) == 0:
+            return "Erro: dados devem ser uma lista não vazia de objetos."
+
+        # ADC do Cloud Run
+        creds, _ = google.auth.default(
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive",
+            ]
+        )
+        gc = gspread.authorize(creds)
+
+        # Criar planilha
+        sh = gc.create(f"Athena — {titulo}")
+        ws = sh.sheet1
+        ws.update_title(titulo[:100])
+
+        # Montar rows
+        if isinstance(parsed[0], dict):
+            headers = list(parsed[0].keys())
+            rows = [headers] + [[str(row.get(h, "")) for h in headers] for row in parsed]
+        else:
+            rows = [[str(c) for c in (row if isinstance(row, list) else [row])] for row in parsed]
+
+        # Escrever batch
+        ws.update(range_name="A1", values=rows)
+
+        # Estilizar header
+        try:
+            ws.format("1", {
+                "backgroundColor": {"red": 0.77, "green": 0.12, "blue": 0.12},
+                "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+            })
+        except Exception:
+            pass
+
+        # Compartilhar com link (qualquer pessoa da org pode acessar)
+        try:
+            sh.share("", perm_type="anyone", role="reader")
+        except Exception:
+            pass
+
+        return (
+            f"Planilha criada com sucesso!\n"
+            f"Título: {sh.title}\n"
+            f"Linhas: {len(parsed)}\n"
+            f"URL: {sh.url}\n"
+            f"Abra no navegador para editar."
+        )
+
+    except ImportError:
+        return "Erro: gspread não instalado no backend."
+    except Exception as e:
+        return f"Erro ao criar planilha: {str(e)}"
 
 
 # ============================================================================

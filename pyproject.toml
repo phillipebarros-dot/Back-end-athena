@@ -42,6 +42,7 @@ dependencies = [
     "pdfplumber>=0.11",
     "python-multipart>=0.0.9",
     "cachetools>=5.4",
+    "gspread>=6.0",
 ]
 
 [project.optional-dependencies]
