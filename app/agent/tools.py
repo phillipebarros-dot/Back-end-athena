@@ -127,9 +127,9 @@ def bigquery_operacional(sql: str) -> list[dict]:
             situacao, data_prazo, data_entrada, data_saida,
             nivel_prioridade(INT, menor=urgente), equipe, briefing.
     Tarefas abertas: situacao NOT IN ('Concluido','Cancelado','Reprovado','Finalizado').
-    Atrasadas: DATE(data_prazo) < CURRENT_DATE(). LIMIT 30.
+    Atrasadas: DATE(data_prazo) < CURRENT_DATE(). LIMIT 50.
     """
-    return _run_bq_query(sql, max_results=30)
+    return _run_bq_query(sql, max_results=50)
 
 
 @tool
@@ -152,9 +152,9 @@ def bigquery_tabela_tv(sql: str) -> list[dict]:
     - target: [SEXO]_[CLASSE]_[IDADE]. Ex: mm_ab_25_mais. Padrão: total_individuos.
     - praca: Grande_Sao_Paulo, Grande_Rio_de_Janeiro, RM_Abertas, etc.
 
-    UPPER() + LIKE para emissoras. ORDER BY audiencia DESC. LIMIT 40.
+    UPPER() + LIKE para emissoras. ORDER BY audiencia DESC. LIMIT 100.
     """
-    return _run_bq_query(sql, max_results=40)
+    return _run_bq_query(sql, max_results=100)
 
 
 @tool

@@ -184,7 +184,35 @@ SEMPRE mostre os dados. NUNCA omita. Acima de R$ 1M: sugira validar com o financ
 - Erro de SQL: corrija e tente de novo; explique brevemente o que ajustou.
 - Zero resultados: sugira alternativas (outro periodo, outro filtro, texto mais generico).
 - Reutilize dados ja consultados na mesma sessao.
+
+=== BUSCA FUZZY / SINONIMOS DE PROGRAMAS ===
+- Nomes de programas no Publi podem ser diferentes do nome popular.
+  Ex: "Meio Dia Parana" pode estar como "MEIO DIA PR", "MEIO_DIA_PARANA", "MD PR", etc.
+- SEMPRE use LOWER() + LIKE '%...%' com termos parciais quando buscar programas.
+  Ex: LOWER(nome_programa) LIKE '%meio%dia%' em vez de = 'Meio Dia Parana'.
+- Se nao encontrar com um nome exato, AUTOMATICAMENTE tente variantes:
+  1. Tente com acentos removidos
+  2. Tente com abreviacoes comuns (PR=Parana, SP=Sao Paulo, RJ=Rio, SC=Santa Catarina)
+  3. Tente so as 2-3 palavras mais significativas
+- Para tabela de precos TV: use LIMIT 100, nao 30. Traga TODOS os programas de um mercado/emissora.
+
+=== DESAMBIGUACAO GEOGRAFICA ===
+- NUNCA confunda mercados Kantar (IBOPE) com estados/cidades do Publi:
+  - "Grande Rio de Janeiro" (Kantar) = Regiao metropolitana do RJ (nao todo o estado)
+  - "RJ Estado" (digital/IBOPE) = todo o estado do RJ incluindo interior
+  - "Grande Sao Paulo" ≠ "SP Estado" ≠ "SP Interior"
+  - "Grande Curitiba" ≠ "PR Estado"
+- Ao reportar resultados com geografia, SEMPRE informe o recorte EXATO do dado.
+  Ex: "Os dados referem-se ao mercado Grande Rio (regiao metropolitana), nao a todo o estado do RJ."
+- Se o usuario pedir "Rio de Janeiro" sem especificar, PERGUNTE: "Voce se refere ao mercado Grande Rio de Janeiro (metropolitana) ou RJ Estado (todo o estado)?"
+
+=== EQUIPE DO USUARIO ===
+- Se o usuario perguntar "minhas tarefas" ou "tarefas da minha equipe", pergunte qual equipe ele pertence na PRIMEIRA vez.
+- Apos o usuario informar a equipe, LEMBRE e reutilize para todas as consultas seguintes na mesma conversa.
+- Equipes comuns no Publi: Midia GRSP, CAP, Digital, Criacao, RTV, Planejamento, Producao, Atendimento.
+- Filtre: WHERE LOWER(equipe) LIKE '%<nome_equipe>%'
 """)
+
 
 
 # ============================================================================

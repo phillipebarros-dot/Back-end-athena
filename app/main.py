@@ -735,20 +735,37 @@ async def list_clients():
 @app.post("/tts", response_model=TTSResponse)
 async def tts(request: TTSRequest):
     """Converte texto em audio via OpenAI TTS."""
-    try:
-        import openai
+    import openai
 
+    if not settings.tts.openai_api_key:
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY nao configurada no backend.")
+
+    # Limitar texto a 4000 chars para evitar timeout
+    text = request.text[:4000] if request.text else ""
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Texto vazio para TTS.")
+
+    try:
         client = openai.AsyncOpenAI(api_key=settings.tts.openai_api_key)
         response = await client.audio.speech.create(
             model=settings.tts.model,
             voice=settings.tts.voice,
-            input=request.text,
+            input=text,
         )
         audio_bytes = response.content
         audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
 
         return TTSResponse(audio=audio_b64)
 
+    except openai.AuthenticationError as e:
+        logger.error("TTS: chave OpenAI invalida ou expirada: %s", e)
+        raise HTTPException(status_code=503, detail="Chave OpenAI invalida. Verifique OPENAI_API_KEY.")
+    except openai.RateLimitError as e:
+        logger.warning("TTS: rate limit OpenAI: %s", e)
+        raise HTTPException(status_code=429, detail="Limite de requisicoes OpenAI atingido. Tente novamente em alguns segundos.")
+    except openai.APIStatusError as e:
+        logger.error("TTS: erro API OpenAI (status %s): %s", e.status_code, e)
+        raise HTTPException(status_code=502, detail=f"Erro OpenAI ({e.status_code}): {e.message}")
     except Exception as e:
         logger.error("Erro no TTS: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erro ao gerar audio: {e}")
@@ -783,15 +800,27 @@ async def export_data(request: ExportRequest):
         try:
             import gspread
             import google.auth
+            from google.oauth2.credentials import Credentials as UserCredentials
 
-            # ADC do Cloud Run (service account automatica)
-            creds, project = google.auth.default(
-                scopes=[
-                    "https://www.googleapis.com/auth/spreadsheets",
-                    "https://www.googleapis.com/auth/drive",
-                ]
-            )
-            gc = gspread.authorize(creds)
+            # Preferir token do usuario (cria no Drive DELE, nao da SA)
+            if request.google_access_token:
+                user_creds = UserCredentials(
+                    token=request.google_access_token,
+                    scopes=[
+                        "https://www.googleapis.com/auth/spreadsheets",
+                        "https://www.googleapis.com/auth/drive",
+                    ],
+                )
+                gc = gspread.authorize(user_creds)
+            else:
+                # Fallback: ADC do Cloud Run (service account)
+                creds, project = google.auth.default(
+                    scopes=[
+                        "https://www.googleapis.com/auth/spreadsheets",
+                        "https://www.googleapis.com/auth/drive",
+                    ]
+                )
+                gc = gspread.authorize(creds)
 
             # Criar planilha
             sh = gc.create(f"Athena — {title}")

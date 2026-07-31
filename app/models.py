@@ -274,3 +274,4 @@ class ExportRequest(BaseModel):
     title: str = "Athena Export"
     format: str = "sheets"  # "sheets" | "csv" | "xlsx"
     user_email: str | None = None  # Email para compartilhar a planilha
+    google_access_token: str | None = None  # Token OAuth do usuario para Sheets
