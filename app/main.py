@@ -27,7 +27,7 @@ import time
 
 import pydantic
 from google.cloud import bigquery
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import traceback
@@ -995,6 +995,194 @@ async def remove_synonym(request: Request):
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Upload de Documentos (PDF/Excel) — Feature Caroline/Phillipe
+# ============================================================================
+
+@app.post("/upload")
+async def upload_document(request: Request, file: UploadFile = File(...)):
+    """Recebe PDF ou Excel, extrai texto e tabelas, retorna conteudo estruturado.
+
+    Usado para: propostas de veiculos, planilhas de entrega, tabelas de custo.
+    Limite: 10MB.
+    Formatos: PDF, XLSX, XLS, CSV.
+    """
+    _verify_auth(request)
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Nenhum arquivo enviado.")
+
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    allowed = {"pdf", "xlsx", "xls", "csv"}
+    if ext not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Formato .{ext} não suportado. Use: {', '.join(allowed)}",
+        )
+
+    contents = await file.read()
+    max_size = 10 * 1024 * 1024  # 10MB
+    if len(contents) > max_size:
+        raise HTTPException(status_code=400, detail="Arquivo excede 10MB.")
+
+    try:
+        if ext == "pdf":
+            extracted = _extract_pdf(contents, file.filename)
+        elif ext in ("xlsx", "xls"):
+            extracted = _extract_excel(contents, file.filename)
+        elif ext == "csv":
+            extracted = _extract_csv(contents, file.filename)
+        else:
+            raise HTTPException(status_code=400, detail="Formato não suportado.")
+
+        logger.info(
+            "Upload processado: %s (%s, %d bytes, %d chars extraidos)",
+            file.filename, ext, len(contents), len(extracted.get("text", "")),
+        )
+        return extracted
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Erro ao processar upload %s: %s", file.filename, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erro ao processar arquivo: {str(e)}")
+
+
+def _extract_pdf(contents: bytes, filename: str) -> dict:
+    """Extrai texto e tabelas de PDF usando pdfplumber."""
+    import io
+    import pdfplumber
+
+    text_parts = []
+    tables_found = []
+
+    with pdfplumber.open(io.BytesIO(contents)) as pdf:
+        for i, page in enumerate(pdf.pages):
+            # Texto da pagina
+            page_text = page.extract_text()
+            if page_text:
+                text_parts.append(f"--- Página {i + 1} ---\n{page_text}")
+
+            # Tabelas da pagina
+            page_tables = page.extract_tables()
+            for ti, table in enumerate(page_tables):
+                if table and len(table) > 1:
+                    # Primeira linha = headers
+                    headers = [str(c or "").strip() for c in table[0]]
+                    rows = []
+                    for row in table[1:]:
+                        rows.append([str(c or "").strip() for c in row])
+                    tables_found.append({
+                        "page": i + 1,
+                        "index": ti,
+                        "headers": headers,
+                        "rows": rows,
+                    })
+
+    full_text = "\n\n".join(text_parts)
+
+    # Limita texto a 30k chars para nao estourar contexto do LLM
+    if len(full_text) > 30000:
+        full_text = full_text[:30000] + "\n\n[... texto truncado, arquivo muito grande ...]"
+
+    return {
+        "filename": filename,
+        "type": "pdf",
+        "pages": len(text_parts),
+        "text": full_text,
+        "tables": tables_found,
+        "tables_count": len(tables_found),
+    }
+
+
+def _extract_excel(contents: bytes, filename: str) -> dict:
+    """Extrai dados de Excel usando openpyxl."""
+    import io
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(contents), data_only=True, read_only=True)
+    sheets_data = []
+    text_parts = []
+
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        rows = []
+        for row in ws.iter_rows(values_only=True):
+            rows.append([str(c if c is not None else "").strip() for c in row])
+
+        if not rows:
+            continue
+
+        # Primeira linha = headers
+        headers = rows[0] if rows else []
+        data_rows = rows[1:] if len(rows) > 1 else []
+
+        # Limita a 500 linhas por aba
+        if len(data_rows) > 500:
+            data_rows = data_rows[:500]
+
+        sheets_data.append({
+            "sheet": sheet_name,
+            "headers": headers,
+            "rows": data_rows,
+            "total_rows": len(rows) - 1,
+        })
+
+        # Texto tabular para contexto do LLM
+        text_parts.append(f"--- Aba: {sheet_name} ({len(data_rows)} linhas) ---")
+        text_parts.append(" | ".join(headers))
+        for dr in data_rows[:100]:  # max 100 linhas no texto
+            text_parts.append(" | ".join(dr))
+
+    wb.close()
+    full_text = "\n".join(text_parts)
+
+    if len(full_text) > 30000:
+        full_text = full_text[:30000] + "\n\n[... texto truncado ...]"
+
+    return {
+        "filename": filename,
+        "type": "excel",
+        "sheets": sheets_data,
+        "sheets_count": len(sheets_data),
+        "text": full_text,
+    }
+
+
+def _extract_csv(contents: bytes, filename: str) -> dict:
+    """Extrai dados de CSV."""
+    import csv
+    import io
+
+    # Tenta detectar encoding
+    try:
+        text = contents.decode("utf-8")
+    except UnicodeDecodeError:
+        text = contents.decode("latin-1")
+
+    reader = csv.reader(io.StringIO(text))
+    rows = list(reader)
+
+    if not rows:
+        return {"filename": filename, "type": "csv", "text": "", "headers": [], "rows": []}
+
+    headers = rows[0]
+    data_rows = rows[1:500]  # max 500
+
+    text_parts = [" | ".join(headers)]
+    for r in data_rows[:100]:
+        text_parts.append(" | ".join(r))
+
+    return {
+        "filename": filename,
+        "type": "csv",
+        "headers": headers,
+        "rows": data_rows,
+        "total_rows": len(rows) - 1,
+        "text": "\n".join(text_parts),
+    }
 
 
 # ============================================================================
