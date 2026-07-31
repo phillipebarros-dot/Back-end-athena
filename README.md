@@ -1,241 +1,235 @@
-# Athena Backend
+# Athena Backend - API de Inteligencia de Midia e Planejamento
 
-Backend do assistente Athena da OpusMultipla. Substitui os 7 webhooks do n8n por uma API FastAPI unificada com agente LangGraph, integracao MCP e persistencia BigQuery/PostgreSQL.
+**Autor**: Phillipe Barros ([@phillipebarros-dot](https://github.com/phillipebarros-dot))  
+**Organizacao**: Opus Multipla / Grupo OM  
+**Versao**: 3.1.0 | **Licenca**: Proprietaria
 
+Backend do assistente Athena. Um agente LLM especializado em midia, planejamento de comunicacao e gestao de investimentos publicitarios. Substitui os 7 webhooks do n8n original por uma API FastAPI unificada com agente LangGraph, integracao MCP e persistencia BigQuery/PostgreSQL.
+
+---
+
+## Indice
+
+- [Tecnologias](#tecnologias)
+- [Arquitetura](#arquitetura)
+- [Funcionalidades](#funcionalidades)
+- [Endpoints da API](#endpoints-da-api)
+- [Configuracao](#configuracao)
+- [Deploy](#deploy)
+- [Estrutura de Arquivos](#estrutura-de-arquivos)
+- [Seguranca](#seguranca)
+
+---
+
+## Tecnologias
+
+| Camada | Tecnologia | Versao | Proposito |
+|--------|-----------|--------|-----------|
+| Runtime | Python | 3.11+ | Linguagem principal |
+| Framework | FastAPI | 0.115+ | API REST assincrona |
+| Servidor | Uvicorn | 0.32+ | ASGI server com hot reload |
+| LLM Principal | Claude Sonnet 4 | via Anthropic API | Raciocinio e geracao de queries |
+| LLM Sumarizador | Claude Haiku 4.5 | via Anthropic API | Compactacao de contexto |
+| Orquestrador | LangGraph | 1.0+ | Grafo de agente ReAct |
+| MCP | langchain-mcp-adapters | 0.3+ | Conexao com 4 MCP servers |
+| Data Warehouse | Google BigQuery | 3.25+ | Consultas SQL e persistencia |
+| Checkpointer | PostgreSQL (Cloud SQL) | via psycopg3 | Estado do agente entre turnos |
+| TTS | OpenAI TTS | tts-1-hd, voz nova | Sintese de voz (texto para audio) |
+| Export | gspread | 6.0+ | Export nativo Google Sheets |
+| Export | openpyxl | 3.1+ | Export XLSX (Excel) |
+| PDF | pdfplumber | 0.11+ | Upload e extracao de PDFs |
+| Validacao | Pydantic | 2.0+ | Schemas e validacao de dados |
+| Templates | Jinja2 | 3.1+ | Renderizacao de prompts |
+| HTTP | httpx | 0.27+ | Chamadas HTTP assincronas |
+| SSE | sse-starlette | 2.0+ | Server-Sent Events (streaming) |
+| Infra | Google Cloud Run | - | Serverless containers |
+| CI/CD | Docker | - | Containerizacao |
+
+---
 
 ## Arquitetura
 
-O backend e uma API FastAPI que recebe requests do frontend Next.js e orquestra um agente LLM (Claude Anthropic) via LangGraph. O agente decide quais tools chamar (BigQuery direto ou MCPs remotos), processa os dados e devolve respostas formatadas em markdown com tabelas GFM.
-
 ```
-Frontend (Next.js)
+Frontend (Next.js / Cloud Run)
     |
     v
 FastAPI (Cloud Run)
     |
-    +-- Auth Middleware (Bearer Token)
-    +-- Rate Limiter (30 req/min)
+    +-- Auth Middleware (Bearer Token + HMAC)
+    +-- Rate Limiter (100 req/min por IP)
     |
     v
 LangGraph Agent (create_react_agent)
     |
-    +-- Claude Sonnet 4 (LLM principal)
-    +-- Claude Haiku 4.5 (sumarizador)
+    +-- Claude Sonnet 4 (LLM principal: raciocinio + SQL)
+    +-- Claude Haiku 4.5 (sumarizador de contexto)
     |
-    +-- Tools MCP (4 servers Cloud Run)
-    |     +-- publi (MySQL ERP ao vivo)
-    |     +-- pesquisas (BigQuery audiencia IBOPE/Radio/OOH/TGI)
-    |     +-- export (Google Sheets/CSV)
-    |     +-- midia_online (BigQuery digital)
+    +-- Tools MCP (4 servers remotos no Cloud Run)
+    |     +-- publi-mysql    > ERP Publi ao vivo (MySQL)
+    |     +-- pesquisas      > BigQuery (IBOPE, Radio, OOH, TGI)
+    |     +-- midia-online   > BigQuery (Meta, Google, TikTok)
+    |     +-- export         > Google Sheets / CSV
     |
     +-- Tools BigQuery locais (8 tools fallback)
-    |     +-- financeiro, orcamento, operacional
-    |     +-- tabela_tv, briefing, fornecedores
-    |     +-- ooh, tgi_choices
+    |     +-- financeiro (PIs, investimentos, comissoes)
+    |     +-- orcamento (orcamentos, pedidos de producao)
+    |     +-- operacional (tarefas, pautas, prazos, equipes)
+    |     +-- tabela_tv (precos TV, LIMIT 100)
+    |     +-- briefing (briefings de campanha)
+    |     +-- fornecedores (veiculos e fornecedores)
+    |     +-- ooh (inventario out-of-home)
+    |     +-- tgi_choices (pesquisa TGI/Choices)
     |
-    +-- Tools utilitarias (6 tools)
-          +-- validar_veiculo (~60 mapeamentos)
-          +-- validar_cliente (Boticario, Eudora, QDB, etc)
-          +-- converter_periodo (ciclos C01 a C06)
-          +-- calcular_indicadores (CPM, GRP, TRP, etc)
-          +-- buscar_web (Google Custom Search)
-          +-- exportar_sheets (MCP export)
+    +-- Tools utilitarias (7 tools)
+    |     +-- cod_clientes (resolucao de marca para codigo)
+    |     +-- converter_ciclo (ciclo C01-C06 para datas)
+    |     +-- ciclo_de_data (data para ciclo)
+    |     +-- enriquecer_grupo_mkt (mercado para grupo)
+    |     +-- buscar_web (Google Custom Search)
+    |     +-- exportar_sheets (gspread nativo)
+    |     +-- exportar_sheet_sql (export SQL direto)
     |
     v
 Persistencia
-    +-- BigQuery (conversas, mensagens, feedback, logs, learnings)
-    +-- PostgreSQL (LangGraph checkpointer via Cloud SQL)
+    +-- BigQuery (conversas, mensagens, feedback, audit, learnings)
+    +-- PostgreSQL / Cloud SQL (LangGraph checkpointer)
 ```
 
+---
 
-## Estrutura de arquivos
+## Funcionalidades
 
-```
-Back-end-athena/
-  app/
-    __init__.py
-    main.py              # FastAPI app, endpoints, middlewares
-    config.py            # Configuracao centralizada (dataclasses tipadas)
-    models.py            # Pydantic models (request/response)
-    agent/
-      __init__.py
-      graph.py           # LangGraph agent builder, MCP client, checkpointer
-      prompts.py         # System prompts dinamicos por cliente
-      tools.py           # 14 tools LangChain (8 BQ + 6 utilitarias)
-    services/
-      __init__.py
-      bq_service.py      # Servico BigQuery (CRUD conversas, mensagens, audit)
-      response_validator.py  # Validacao de respostas do agente
-  Dockerfile             # Container Python 3.11
-  pyproject.toml         # Dependencias e configuracao do projeto
-  .env.example           # Template de variaveis de ambiente
-  test_chat.py           # Teste basico do endpoint /chat
-```
+### Consulta de Dados Corporativos
+- Financeiro: PIs, investimentos por veiculo/meio/periodo, comissoes, valores liquidos e brutos
+- Orcamento: Orcamentos e pedidos de producao
+- Operacional: Tarefas abertas, prazos, briefings, timesheet, equipes
+- TV: Tabela de precos completa (100+ programas por mercado)
+- Audiencia: IBOPE (TV), EasyMedia4 (Radio), inventario OOH
+- TGI: Perfil de consumo, afinidade, penetracao
+- Digital: Meta Ads, Google Ads, TikTok Ads (impressoes, cliques, CPM)
 
+### Inteligencia do Agente
+- Busca fuzzy: Nomes de programas com LIKE + variantes automaticas
+- Desambiguacao geografica: Diferencia mercados Kantar (metro) vs estados
+- Contexto de equipe: Lembra a equipe do usuario na conversa
+- Compactacao automatica: Apos 20 mensagens, resume contexto
+- Retry automatico: Corrige queries SQL que falham e retenta
+
+### Export de Dados
+- Google Sheets: Cria planilha nativa no Drive do usuario via OAuth
+- XLSX: Excel com headers estilizados e auto-width
+- CSV: Fallback universal
+- Export por SQL: Para datasets grandes (centenas/milhares de linhas)
+
+### Voz (TTS)
+- Text-to-Speech: Converte respostas em audio via OpenAI (modelo tts-1-hd, voz nova)
+- Speech-to-Text: Web Speech API no frontend (Chrome)
+
+### Gestao
+- Conversas: CRUD completo com historico persistente
+- Feedback: Like/dislike com comentario por mensagem
+- Auditoria: Log completo de queries, tokens, timestamps
+- Admin: Gestao de dominios permitidos, sinonimos, usuarios
+
+---
 
 ## Endpoints da API
 
-| Metodo | Rota | Descricao |
-|--------|------|-----------|
-| POST | /chat | Envia mensagem ao agente, recebe resposta com tabelas, sources e SQL |
-| POST | /conversations | CRUD de conversas (list, create, updateTitle, delete) |
-| POST | /history | Recupera historico de mensagens de uma conversa |
+| Metodo | Endpoint | Descricao |
+|--------|----------|-----------|
+| POST | /chat | Envia mensagem e recebe resposta do agente |
+| POST | /conversations | Cria nova conversa |
+| POST | /history | Retorna historico de uma conversa |
 | POST | /save-message | Persiste mensagem no BigQuery |
-| POST | /compact | Compacta conversas com 20+ mensagens via Haiku |
-| POST | /feedback | Registra feedback positivo/negativo com comentario |
-| POST | /audit | Metricas para dashboard admin (KPIs, top users, feedback, MCP health) |
-| POST | /users | Gestao de usuarios e RBAC (list, check, update_role) |
-| POST | /search-entities | Autocomplete de entidades (veiculo, programa, praca) |
-| GET  | /list-clients | Lista dinamica de clientes/anunciantes |
-| POST | /tts | Text to Speech via OpenAI API |
-| POST | /export | Exporta dados para CSV/XLSX |
+| POST | /feedback | Registra like/dislike com comentario |
+| POST | /compact | Compacta contexto de uma conversa |
+| POST | /tts | Text-to-Speech (OpenAI tts-1-hd) |
+| POST | /export | Exporta dados (Sheets/XLSX/CSV) |
+| POST | /upload | Upload de PDFs/Excel/CSV |
+| POST | /resume | Retorna ultima mensagem de uma conversa |
+| POST | /users | CRUD de usuarios (check/upsert/list/update_role) |
+| POST | /audit | Busca logs de auditoria |
+| GET  | /health | Health check para Cloud Run |
 | GET  | /settings/domains | Lista dominios permitidos |
-| POST | /settings/domains/add | Adiciona dominio permitido |
-| POST | /settings/domains/remove | Remove dominio permitido |
-| GET  | /settings/synonyms | Lista sinonimos do dicionario |
+| POST | /settings/domains/add | Adiciona dominio |
+| POST | /settings/domains/remove | Remove dominio |
+| GET  | /settings/synonyms | Lista sinonimos |
 | POST | /settings/synonyms/add | Adiciona sinonimo |
 | POST | /settings/synonyms/remove | Remove sinonimo |
-| GET  | /health | Health check do servico |
 
-
-## Conexao com os MCPs
-
-O backend conecta nos 4 MCPs do Camilo usando a biblioteca `langchain-mcp-adapters`. No startup do agente, a funcao `_load_mcp_tools()` em `graph.py` cria um `MultiServerMCPClient` passando as URLs dos 4 MCPs com transporte `streamable_http` e autenticacao Bearer Token. O adapter descobre automaticamente todas as tools que cada MCP expoe via protocolo MCP e as converte em tools LangChain com prefixo do server (ex: `publi__consultar_mysql`). Se os MCPs estiverem indisponiveis, o sistema ativa um fallback automatico (`_load_tools_with_fallback`) que carrega as 14 tools BigQuery locais definidas em `tools.py`.
-
-URLs dos MCPs (defaults em config.py, podem ser sobrescritas por env vars):
-
-| MCP | URL | Funcao |
-|-----|-----|--------|
-| publi | https://mcp-publi-mysql-642859299503.us-central1.run.app/mcp | ERP ao vivo (MySQL) |
-| pesquisas | https://mcp-pesquisas-642859299503.us-central1.run.app/mcp | Audiencia IBOPE, Radio, OOH, TGI |
-| export | https://mcp-export-642859299503.us-central1.run.app/mcp | Exportacao Google Sheets |
-| midia_online | https://mcp-midia-online-642859299503.us-central1.run.app/mcp | Performance digital |
-
-
-## Agente LangGraph
-
-O agente usa `create_react_agent` do LangGraph com os seguintes componentes:
-
-1. **LLM principal**: Claude Sonnet 4 (temperature 0.15, 4096 tokens)
-2. **Sumarizador**: Claude Haiku 4.5 (temperature 0.1, 1024 tokens) para compactacao de memoria
-3. **Checkpointer**: PostgreSQL via Cloud SQL (fallback para MemorySaver em memoria)
-4. **Cache de agentes**: Um agente por cliente em cache (`_agent_cache`), protegido por `asyncio.Lock`
-5. **System prompt**: Dinamico por cliente, renderizado por Jinja2 a partir de `prompts.py`
-6. **Max iteracoes**: 20 iteracoes de tool calls por request
-
-O agente suporta multi-tenant. Quando o frontend manda `client: "O Boticario"`, o backend cria (ou reutiliza do cache) um agente com system prompt especifico para aquele cliente. O MCP resolve internamente o codigo do cliente para filtrar dados.
-
-
-## Tools do Agente
-
-### BigQuery (8 tools, fallback quando MCP indisponivel)
-
-| Tool | Tabela/Funcao |
-|------|---------------|
-| bigquery_financeiro | PIs, investimentos, comissoes |
-| bigquery_orcamento | Orcamentos de campanha |
-| bigquery_operacional | Dados operacionais de veiculacao |
-| bigquery_tabela_tv | Tabelas de preco de TV (com formatacao R$) |
-| bigquery_briefing | Briefings de campanha |
-| bigquery_fornecedores | Cadastro de fornecedores/veiculos |
-| bigquery_ooh | Dados Out of Home |
-| tgi_choices | Pesquisas TGI (segmentacao/consumo) |
-
-### Utilitarias (6 tools)
-
-| Tool | Funcao |
-|------|--------|
-| validar_veiculo | Normaliza ~60 nomes comerciais para nomes canonicos BigQuery |
-| validar_cliente | Mapeia apelidos para codigos de cliente (Boticario, Eudora, QDB, etc) |
-| converter_periodo | Converte datas, meses e ciclos (C01 a C06) para filtros SQL |
-| calcular_indicadores | Calcula CPM, GRP, TRP, cobertura, frequencia |
-| buscar_web | Pesquisa web via Google Custom Search API |
-| exportar_sheets | Exporta dados para Google Sheets via MCP export |
-
+---
 
 ## Configuracao
 
-Todas as configuracoes sao gerenciadas por `config.py` via dataclasses tipadas. Valores vem de variaveis de ambiente (`.env` ou Cloud Run secrets).
+### Variaveis de Ambiente
 
-### Secrets obrigatorios (Google Secret Manager)
+```env
+# Obrigatorias
+ANTHROPIC_API_KEY=sk-ant-...          # Claude API
+OPENAI_API_KEY=sk-proj-...            # TTS (tts-1-hd, voz nova)
+MCP_AUTH_TOKEN=token-dos-mcps         # Autenticacao dos MCP servers
+POSTGRES_URI=postgresql://...         # Cloud SQL (checkpointer)
 
-| Secret | Descricao |
-|--------|-----------|
-| ANTHROPIC_API_KEY | Chave da API Anthropic (Claude) |
-| OPENAI_API_KEY | Chave da API OpenAI (TTS) |
-| MCP_AUTH_TOKEN | Token Bearer para autenticacao nos MCPs |
-| CLOUDSQL_PASSWORD | Senha do PostgreSQL (Cloud SQL) |
-| POSTGRES_URI | URI de conexao PostgreSQL (alternativa ao Cloud SQL Connector) |
+# Google Cloud
+GOOGLE_CLOUD_PROJECT=athenaai-opus
+BQ_DATASET=ath_boticario
 
-### Variaveis de ambiente opcionais
+# CORS
+CORS_ALLOWED_ORIGINS=https://athena-frontend-xxx.run.app
 
-| Variavel | Default | Descricao |
-|----------|---------|-----------|
-| BQ_PROJECT_ID | athenaai-opus | Projeto BigQuery dos dados de midia |
-| BQ_PROJECT_PERSISTENCE | sheetsintegration-451500 | Projeto BigQuery da persistencia |
-| BQ_DATASET_MEDIA | ath_boticario | Dataset de midia |
-| BQ_DATASET_PERSISTENCE | pj_boti | Dataset de persistencia |
-| LLM_MODEL_MAIN | claude-sonnet-4-6 | Modelo LLM principal |
-| LLM_MODEL_SUMMARIZER | claude-haiku-4-5 | Modelo sumarizador |
-| RATE_LIMIT_PER_MINUTE | 30 | Limite de requests por minuto |
-| CORS_ALLOWED_ORIGINS | (frontend URLs) | Origens permitidas para CORS |
-| PORT | 8080 | Porta do servidor |
+# MCP Servers
+MCP_PUBLI_URL=https://mcp-publi-xxx.run.app
+MCP_PESQUISAS_URL=https://mcp-pesquisas-xxx.run.app
+MCP_MIDIA_URL=https://mcp-midia-xxx.run.app
+MCP_EXPORT_URL=https://mcp-export-xxx.run.app
 
+# Opcionais
+DEBUG=false
+LANGSMITH_API_KEY=...                 # Observabilidade LangSmith
+```
+
+---
 
 ## Deploy
 
-O backend roda no Google Cloud Run. O deploy e feito via source deploy:
-
 ```bash
-gcloud run deploy athena-backend-teste \
+# Build e deploy no Cloud Run
+gcloud run deploy athena-backend \
   --source=. \
   --region=us-central1 \
   --allow-unauthenticated \
   --timeout=300
 ```
 
-Os secrets sao mapeados automaticamente do Google Secret Manager para env vars no Cloud Run:
+---
 
-```bash
-gcloud run services update athena-backend-teste \
-  --region=us-central1 \
-  --update-secrets=ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest
+## Estrutura de Arquivos
+
+```
+Back-end-athena/
+  app/
+    main.py              # FastAPI app + todos os endpoints
+    config.py            # Settings (Pydantic BaseSettings)
+    models.py            # Schemas Pydantic (request/response)
+    agent/
+      graph.py           # LangGraph (create_react_agent + MCP)
+      tools.py           # 15 tools (BigQuery + utilitarias)
+      prompts.py         # System prompt (regras de negocio)
+    services/
+      bq_service.py      # Servico BigQuery (CRUD tabelas)
+  Dockerfile             # Container para Cloud Run
+  pyproject.toml         # Dependencias e metadata
+  requirements.txt       # Lock de dependencias
+  README.md              # Este arquivo
 ```
 
+---
 
 ## Seguranca
 
-1. Auth middleware valida Bearer Token em todos os requests (exceto /health)
-2. Rate limiter: 30 requests por minuto por IP
-3. Queries BigQuery: apenas SELECT permitido, LIMIT forcado, 1GB max billing
-4. CORS restrito aos dominios do frontend
-5. Admin verificado via BigQuery (tabela athena_users.role) com fallback para ADMIN_EMAILS
-6. Input limitado a 4000 caracteres
-
-
-## Desenvolvimento local
-
-```bash
-# Instalar dependencias
-pip install -e ".[dev]"
-
-# Configurar variaveis
-cp .env.example .env
-# Editar .env com as credenciais reais
-
-# Rodar
-uvicorn app.main:app --reload --port 8080
-```
-
-
-## Testes
-
-```bash
-pytest test_chat.py -v
-```
-
-
-## Autores
-
-Phillipe Barros, Camilo Ferreira, Wesley Macena, Andrei Nogueira
-Grupo OpusMultipla
+- Auth: Bearer Token via HMAC (comparacao em tempo constante)
+- Rate Limiting: 100 req/min por IP (middleware FastAPI)
+- CORS: Restrito ao dominio do frontend
+- Secrets: Todas as chaves via Google Secret Manager
+- ADC: Application Default Credentials no Cloud Run
+- Audit: Log completo de queries e interacoes no BigQuery
