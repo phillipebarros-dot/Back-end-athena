@@ -23,8 +23,10 @@ from __future__ import annotations
 import logging
 import time
 import random
+import hashlib
 from datetime import datetime, timezone
 
+from cachetools import TTLCache
 from google.cloud import bigquery
 
 from app.config import settings
@@ -37,6 +39,13 @@ class BigQueryService:
 
     def __init__(self) -> None:
         self._client: bigquery.Client | None = None
+        self._client_persistence: bigquery.Client | None = None
+        # Cache in-memory com TTL (Fase 1 otimizacao, custo $0)
+        self._cache_conversations = TTLCache(maxsize=500, ttl=30)
+        self._cache_admin = TTLCache(maxsize=200, ttl=300)
+        self._cache_clients = TTLCache(maxsize=1, ttl=300)
+        self._cache_users = TTLCache(maxsize=1, ttl=60)
+        self._cache_kpis = TTLCache(maxsize=1, ttl=120)
 
     @property
     def client(self) -> bigquery.Client:
@@ -89,10 +98,10 @@ class BigQueryService:
     # =========================================================================
 
     def list_conversations(self, user_id: str) -> list[dict]:
-        """Lista conversas de um usuário.
-
-        Equivale ao node: BQ Listar Conversas
-        """
+        """Lista conversas de um usuario. Cache TTL=30s por user_id."""
+        cache_key = f"conv:{user_id}"
+        if cache_key in self._cache_conversations:
+            return self._cache_conversations[cache_key]
         sql = f"""
             SELECT conversation_id, user_id, title, status, message_count,
                    created_at, updated_at
@@ -102,7 +111,9 @@ class BigQueryService:
             LIMIT 50
         """
         params = [bigquery.ScalarQueryParameter("user_id", "STRING", user_id)]
-        return self._query(sql, params)
+        result = self._query(sql, params)
+        self._cache_conversations[cache_key] = result
+        return result
 
     def create_conversation(
         self, user_id: str, conversation_id: str, title: str = "Nova conversa",
@@ -126,6 +137,7 @@ class BigQueryService:
             bigquery.ScalarQueryParameter("now", "STRING", now),
         ]
         self._execute(sql, params)
+        self.invalidate_cache("conversations")
         return {"conversation_id": conversation_id, "title": title, "created_at": now}
 
     def update_title(self, conversation_id: str, title: str) -> bool:
@@ -145,6 +157,7 @@ class BigQueryService:
             bigquery.ScalarQueryParameter("conv_id", "STRING", conversation_id),
         ]
         self._execute(sql, params)
+        self.invalidate_cache("conversations")
         return True
 
     def delete_conversation(self, conversation_id: str) -> bool:
@@ -164,15 +177,14 @@ class BigQueryService:
             bigquery.ScalarQueryParameter("conv_id", "STRING", conversation_id),
         ]
         self._execute(sql, params)
+        self.invalidate_cache("conversations")
         return True
 
     def list_clients(self) -> list[str]:
-        """Lista clientes distintos da tabela principal de dados.
-
-        Query no projeto de dados (athenaai-opus), não no de persistência.
-        Retorna nomes únicos de clientes ativos.
-        """
-        # Usa client do projeto de dados, não o de persistência
+        """Lista clientes distintos. Cache TTL=300s."""
+        cache_key = "clients"
+        if cache_key in self._cache_clients:
+            return self._cache_clients[cache_key]
         data_table = f"`{settings.bq.project_id}.{settings.bq.dataset_media}.pi01`"
         sql = f"""
             SELECT DISTINCT UPPER(cliente) as cliente
@@ -182,15 +194,15 @@ class BigQueryService:
             LIMIT 50
         """
         try:
-            # Precisa usar client do projeto de dados
             job_config = bigquery.QueryJobConfig()
             data_client = bigquery.Client(project=settings.bq.project_id)
             result = data_client.query(sql, job_config=job_config, timeout=15)
             rows = [dict(row) for row in result.result(timeout=15)]
-            return [r["cliente"] for r in rows if r.get("cliente")]
+            clients = [r["cliente"] for r in rows if r.get("cliente")]
+            self._cache_clients[cache_key] = clients
+            return clients
         except Exception as e:
             logger.warning("Falha ao listar clientes: %s", e)
-            # Fallback hardcoded dos clientes conhecidos (do mapa validar_cliente)
             return [
                 "AUSTRALIAN GOLD", "BEAUTYBOX", "EUDORA",
                 "GRUPO BOTICARIO", "MULTI B", "O BOTICARIO",
@@ -604,14 +616,17 @@ class BigQueryService:
         return rows[0] if rows else None
 
     def is_admin(self, email: str) -> bool:
-        """Verifica se o usuário tem role 'admin' na athena_users.
-
-        Fallback: se o usuário não existe na tabela, retorna False.
-        """
+        """Verifica admin. Cache TTL=300s."""
+        cache_key = f"admin:{email.lower()}"
+        if cache_key in self._cache_admin:
+            return self._cache_admin[cache_key]
         user = self.get_user_by_email(email)
         if user is None:
+            self._cache_admin[cache_key] = False
             return False
-        return user.get("role") == "admin"
+        result = user.get("role") == "admin"
+        self._cache_admin[cache_key] = result
+        return result
 
     def upsert_user(
         self,
@@ -674,17 +689,38 @@ class BigQueryService:
             bigquery.ScalarQueryParameter("email", "STRING", email.lower()),
         ]
         self._execute(sql, params)
+        self.invalidate_cache("users")
+        self.invalidate_cache("admin")
         return True
 
     def list_users(self) -> list[dict]:
-        """Lista todos os usuários cadastrados."""
+        """Lista todos os usuarios cadastrados. Cache TTL=60s."""
+        cache_key = "users"
+        if cache_key in self._cache_users:
+            return self._cache_users[cache_key]
         sql = f"""
             SELECT email, nome, departamento, role, created_at, last_login
             FROM {self._table('athena_users')}
             ORDER BY created_at DESC
             LIMIT 200
         """
-        return self._query(sql)
+        result = self._query(sql)
+        self._cache_users[cache_key] = result
+        return result
+
+    def invalidate_cache(self, cache_type: str = "all") -> None:
+        """Invalida cache manualmente apos writes."""
+        if cache_type in ("all", "conversations"):
+            self._cache_conversations.clear()
+        if cache_type in ("all", "admin"):
+            self._cache_admin.clear()
+        if cache_type in ("all", "clients"):
+            self._cache_clients.clear()
+        if cache_type in ("all", "users"):
+            self._cache_users.clear()
+        if cache_type in ("all", "kpis"):
+            self._cache_kpis.clear()
+        logger.info("Cache invalidado: %s", cache_type)
 
 
 # Singleton

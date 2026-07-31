@@ -734,15 +734,12 @@ async def list_clients():
 
 @app.post("/tts", response_model=TTSResponse)
 async def tts(request: TTSRequest):
-    """Converte texto em áudio via OpenAI TTS.
-
-    Substitui: Webhook TTS → OpenAI TTS → TTS to Base64 → Respond.
-    """
+    """Converte texto em audio via OpenAI TTS."""
     try:
         import openai
 
-        client = openai.OpenAI(api_key=settings.tts.openai_api_key)
-        response = client.audio.speech.create(
+        client = openai.AsyncOpenAI(api_key=settings.tts.openai_api_key)
+        response = await client.audio.speech.create(
             model=settings.tts.model,
             voice=settings.tts.voice,
             input=request.text,
@@ -750,12 +747,11 @@ async def tts(request: TTSRequest):
         audio_bytes = response.content
         audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
 
-        # n8n retorna campo 'audio', não 'audio_base64'
         return TTSResponse(audio=audio_b64)
 
     except Exception as e:
-        logger.error("Erro no TTS: %s", e)
-        raise HTTPException(status_code=500, detail=f"Erro ao gerar áudio: {e}")
+        logger.error("Erro no TTS: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erro ao gerar audio: {e}")
 
 
 # ============================================================================
