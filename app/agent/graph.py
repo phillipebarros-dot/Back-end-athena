@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any
 
 from langchain_anthropic import ChatAnthropic
@@ -76,6 +77,11 @@ async def initialize_checkpointer():
     Chamado UMA VEZ pelo lifespan do FastAPI no startup.
     Se Postgres não estiver disponível, cai para MemorySaver.
 
+    Prioridade de conexão:
+      1. CLOUDSQL_* vars (host/user/password/db separados — evita encoding)
+      2. POSTGRES_URI (fallback — precisa de encoding correto)
+      3. MemorySaver (dev/teste)
+
     FIX C2: AsyncPostgresSaver.setup() cria as tabelas checkpoints/
     checkpoint_blobs/checkpoint_writes. Sem isso, a primeira leitura
     estoura UndefinedTable.
@@ -85,8 +91,28 @@ async def initialize_checkpointer():
     """
     global _checkpointer, _checkpointer_pool
 
-    if not settings.persistence.postgres_uri:
-        logger.info("POSTGRES_URI não configurado. Usando MemorySaver (dev/teste). State NÃO persiste entre restarts.")
+    # Determina conninfo: prioriza componentes individuais (sem encoding)
+    conninfo = None
+    p = settings.persistence
+
+    if p.cloudsql_user and p.cloudsql_password:
+        # Cloud SQL via IP direto com componentes separados (evita URL encoding)
+        from psycopg.conninfo import make_conninfo
+        conninfo = make_conninfo(
+            host=os.getenv("CLOUDSQL_HOST", "34.59.118.159"),
+            port=int(os.getenv("CLOUDSQL_PORT", "5432")),
+            user=p.cloudsql_user,
+            password=p.cloudsql_password,
+            dbname=p.cloudsql_db,
+            sslmode=os.getenv("CLOUDSQL_SSLMODE", "require"),
+        )
+        logger.info("Postgres conninfo construído via CLOUDSQL_* vars (host=%s, user=%s, db=%s)",
+                     os.getenv("CLOUDSQL_HOST", "34.59.118.159"), p.cloudsql_user, p.cloudsql_db)
+    elif p.postgres_uri:
+        conninfo = p.postgres_uri
+        logger.info("Postgres conninfo via POSTGRES_URI")
+    else:
+        logger.info("Postgres não configurado. Usando MemorySaver (dev/teste). State NÃO persiste entre restarts.")
         _checkpointer = MemorySaver()
         return
 
@@ -96,7 +122,7 @@ async def initialize_checkpointer():
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
         pool = AsyncConnectionPool(
-            conninfo=settings.persistence.postgres_uri,
+            conninfo=conninfo,
             kwargs={"autocommit": True, "row_factory": dict_row},
             open=False,  # FIX M3: não abrir no construtor
         )
