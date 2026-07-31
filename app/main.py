@@ -636,6 +636,90 @@ async def export(request: ExportRequest):
 
 
 # ============================================================================
+# GET/POST /settings/domains — Gerenciar domínios de e-mail permitidos
+# ============================================================================
+
+@app.get("/settings/domains")
+async def get_allowed_domains():
+    """Retorna lista de domínios de e-mail permitidos para login."""
+    from app.services.bq_service import get_bq_service
+    bq = get_bq_service()
+    try:
+        sql = f"""
+            SELECT domain FROM `{settings.bq.project_persistence}.{settings.bq.dataset_persistence}.athena_settings`
+            WHERE setting_key = 'allowed_domain'
+            ORDER BY domain
+        """
+        result = bq._client_persistence.query(sql, timeout=10)
+        domains = [row["domain"] for row in result.result(timeout=10)]
+        if not domains:
+            # Fallback: domínios padrão
+            domains = ["grupoom.com.br", "opusmultipla.com.br"]
+        return {"domains": domains}
+    except Exception:
+        return {"domains": ["grupoom.com.br", "opusmultipla.com.br"]}
+
+
+class DomainRequest(BaseModel):
+    domain: str
+
+
+@app.post("/settings/domains/add")
+async def add_allowed_domain(request: DomainRequest):
+    """Adiciona um domínio de e-mail permitido."""
+    domain = request.domain.strip().lower()
+    if not domain or "." not in domain:
+        raise HTTPException(status_code=400, detail="Domínio inválido")
+
+    from app.services.bq_service import get_bq_service
+    bq = get_bq_service()
+    try:
+        # Cria tabela se não existe
+        bq._client_persistence.query(f"""
+            CREATE TABLE IF NOT EXISTS `{settings.bq.project_persistence}.{settings.bq.dataset_persistence}.athena_settings` (
+                setting_key STRING,
+                domain STRING,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """, timeout=15).result(timeout=15)
+
+        # Insere domínio (evita duplicata)
+        bq._client_persistence.query(f"""
+            INSERT INTO `{settings.bq.project_persistence}.{settings.bq.dataset_persistence}.athena_settings`
+            (setting_key, domain)
+            SELECT 'allowed_domain', @domain
+            WHERE NOT EXISTS (
+                SELECT 1 FROM `{settings.bq.project_persistence}.{settings.bq.dataset_persistence}.athena_settings`
+                WHERE setting_key = 'allowed_domain' AND domain = @domain
+            )
+        """, job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("domain", "STRING", domain)]
+        ), timeout=15).result(timeout=15)
+
+        return {"ok": True, "domain": domain}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/settings/domains/remove")
+async def remove_allowed_domain(request: DomainRequest):
+    """Remove um domínio de e-mail permitido."""
+    domain = request.domain.strip().lower()
+    from app.services.bq_service import get_bq_service
+    bq = get_bq_service()
+    try:
+        bq._client_persistence.query(f"""
+            DELETE FROM `{settings.bq.project_persistence}.{settings.bq.dataset_persistence}.athena_settings`
+            WHERE setting_key = 'allowed_domain' AND domain = @domain
+        """, job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("domain", "STRING", domain)]
+        ), timeout=15).result(timeout=15)
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 # Entrypoint
 # ============================================================================
 
