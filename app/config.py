@@ -70,7 +70,7 @@ class MCPConfig:
         "MCP_MIDIA_ONLINE_URL",
         "https://mcp-midia-online-642859299503.us-central1.run.app/mcp",
     )
-    auth_token: str = os.getenv("MCP_AUTH_TOKEN", "")
+    auth_token: str = os.getenv("MCP_AUTH_TOKEN", "").strip()
 
 
 @dataclass(frozen=True)

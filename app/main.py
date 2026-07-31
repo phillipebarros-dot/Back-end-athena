@@ -160,7 +160,7 @@ async def auth_middleware(request: Request, call_next):
     api_key = request.headers.get("x-api-key", "")
     token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else api_key
 
-    if not token or not hmac.compare_digest(token, AUTH_TOKEN):
+    if not token or not hmac.compare_digest(token.strip(), AUTH_TOKEN.strip()):
         return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
 
     return await call_next(request)
