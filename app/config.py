@@ -99,10 +99,19 @@ class PersistenceConfig:
 
 @dataclass(frozen=True)
 class TTSConfig:
-    """Configuração do Text-to-Speech (OpenAI)."""
+    """Configuracao do Text-to-Speech.
+
+    provider: 'google' (Neural2 pt-BR nativo) ou 'openai' (fallback).
+    Google Cloud TTS usa ADC do Cloud Run automaticamente.
+    """
+    provider: str = os.getenv("TTS_PROVIDER", "google")  # 'google' ou 'openai'
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     model: str = os.getenv("TTS_MODEL", "tts-1-hd")
     voice: str = os.getenv("TTS_VOICE", "onyx")
+    # Google Cloud TTS
+    google_voice: str = os.getenv("TTS_GOOGLE_VOICE", "pt-BR-Neural2-B")
+    google_language: str = os.getenv("TTS_GOOGLE_LANGUAGE", "pt-BR")
+    google_speaking_rate: float = float(os.getenv("TTS_GOOGLE_SPEAKING_RATE", "1.05"))
 
 
 @dataclass(frozen=True)

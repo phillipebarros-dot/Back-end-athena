@@ -256,20 +256,51 @@ async def chat(request: ChatRequest):
         except Exception as log_err:
             logger.warning("Falha ao registrar log: %s", log_err)
 
-        # TTS inline — equivalente aos nodes "Is Audio Request?" → "OpenAI TTS" → "Encode Audio Chat"
+        # TTS inline — Google Cloud TTS (pt-BR nativo) com fallback OpenAI
         audio_b64 = None
         if request.is_audio:
-            try:
-                import openai
-                tts_client = openai.OpenAI(api_key=settings.tts.openai_api_key)
-                tts_response = tts_client.audio.speech.create(
-                    model=settings.tts.model,
-                    voice=settings.tts.voice,
-                    input=output[:5000],  # Limita texto para TTS
-                )
-                audio_b64 = base64.b64encode(tts_response.content).decode("utf-8")
-            except Exception as tts_err:
-                logger.warning("Falha no TTS inline: %s", tts_err)
+            tts_text = output[:5000]  # Limita texto para TTS
+
+            # Tentar Google Cloud TTS primeiro (voz pt-BR nativa)
+            if settings.tts.provider == "google":
+                try:
+                    from google.cloud import texttospeech
+                    tts_client = texttospeech.TextToSpeechClient()
+                    synthesis_input = texttospeech.SynthesisInput(text=tts_text)
+                    voice_params = texttospeech.VoiceSelectionParams(
+                        language_code=settings.tts.google_language,
+                        name=settings.tts.google_voice,
+                        ssml_gender=texttospeech.SsmlVoiceGender.MALE,
+                    )
+                    audio_config = texttospeech.AudioConfig(
+                        audio_encoding=texttospeech.AudioEncoding.MP3,
+                        speaking_rate=settings.tts.google_speaking_rate,
+                        pitch=0.0,
+                    )
+                    tts_response = tts_client.synthesize_speech(
+                        input=synthesis_input,
+                        voice=voice_params,
+                        audio_config=audio_config,
+                    )
+                    audio_b64 = base64.b64encode(tts_response.audio_content).decode("utf-8")
+                    logger.info("TTS Google Cloud (pt-BR-Neural2-B) gerado com sucesso")
+                except Exception as google_tts_err:
+                    logger.warning("Google TTS falhou, tentando OpenAI: %s", google_tts_err)
+
+            # Fallback OpenAI ou provider openai
+            if audio_b64 is None and settings.tts.openai_api_key:
+                try:
+                    import openai
+                    tts_client = openai.OpenAI(api_key=settings.tts.openai_api_key)
+                    tts_response = tts_client.audio.speech.create(
+                        model=settings.tts.model,
+                        voice=settings.tts.voice,
+                        input=tts_text,
+                    )
+                    audio_b64 = base64.b64encode(tts_response.content).decode("utf-8")
+                    logger.info("TTS OpenAI (%s) gerado com sucesso", settings.tts.voice)
+                except Exception as tts_err:
+                    logger.warning("Falha no TTS OpenAI: %s", tts_err)
 
         return ChatResponse(
             output=output,
@@ -734,41 +765,59 @@ async def list_clients():
 
 @app.post("/tts", response_model=TTSResponse)
 async def tts(request: TTSRequest):
-    """Converte texto em audio via OpenAI TTS."""
-    import openai
-
-    if not settings.tts.openai_api_key:
-        raise HTTPException(status_code=503, detail="OPENAI_API_KEY nao configurada no backend.")
-
+    """Converte texto em audio. Google Cloud TTS (pt-BR nativo) com fallback OpenAI."""
     # Limitar texto a 4000 chars para evitar timeout
     text = request.text[:4000] if request.text else ""
     if not text.strip():
         raise HTTPException(status_code=400, detail="Texto vazio para TTS.")
 
-    try:
-        client = openai.AsyncOpenAI(api_key=settings.tts.openai_api_key)
-        response = await client.audio.speech.create(
-            model=settings.tts.model,
-            voice=settings.tts.voice,
-            input=text,
-        )
-        audio_bytes = response.content
-        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+    audio_b64 = None
 
-        return TTSResponse(audio=audio_b64)
+    # Google Cloud TTS (pt-BR Neural2 nativo)
+    if settings.tts.provider == "google":
+        try:
+            from google.cloud import texttospeech
+            tts_client = texttospeech.TextToSpeechClient()
+            synthesis_input = texttospeech.SynthesisInput(text=text)
+            voice_params = texttospeech.VoiceSelectionParams(
+                language_code=settings.tts.google_language,
+                name=settings.tts.google_voice,
+                ssml_gender=texttospeech.SsmlVoiceGender.MALE,
+            )
+            audio_config = texttospeech.AudioConfig(
+                audio_encoding=texttospeech.AudioEncoding.MP3,
+                speaking_rate=settings.tts.google_speaking_rate,
+                pitch=0.0,
+            )
+            tts_response = tts_client.synthesize_speech(
+                input=synthesis_input,
+                voice=voice_params,
+                audio_config=audio_config,
+            )
+            audio_b64 = base64.b64encode(tts_response.audio_content).decode("utf-8")
+            logger.info("TTS Google Cloud gerado com sucesso (%d chars)", len(text))
+        except Exception as google_err:
+            logger.warning("Google TTS falhou, tentando OpenAI: %s", google_err)
 
-    except openai.AuthenticationError as e:
-        logger.error("TTS: chave OpenAI invalida ou expirada: %s", e)
-        raise HTTPException(status_code=503, detail="Chave OpenAI invalida. Verifique OPENAI_API_KEY.")
-    except openai.RateLimitError as e:
-        logger.warning("TTS: rate limit OpenAI: %s", e)
-        raise HTTPException(status_code=429, detail="Limite de requisicoes OpenAI atingido. Tente novamente em alguns segundos.")
-    except openai.APIStatusError as e:
-        logger.error("TTS: erro API OpenAI (status %s): %s", e.status_code, e)
-        raise HTTPException(status_code=502, detail=f"Erro OpenAI ({e.status_code}): {e.message}")
-    except Exception as e:
-        logger.error("Erro no TTS: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Erro ao gerar audio: {e}")
+    # Fallback OpenAI
+    if audio_b64 is None:
+        if not settings.tts.openai_api_key:
+            raise HTTPException(status_code=503, detail="Nenhum provider TTS disponivel.")
+        try:
+            import openai
+            client = openai.AsyncOpenAI(api_key=settings.tts.openai_api_key)
+            response = await client.audio.speech.create(
+                model=settings.tts.model,
+                voice=settings.tts.voice,
+                input=text,
+            )
+            audio_b64 = base64.b64encode(response.content).decode("utf-8")
+            logger.info("TTS OpenAI gerado com sucesso (%d chars)", len(text))
+        except Exception as e:
+            logger.error("Erro no TTS: %s", e, exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Erro ao gerar audio: {e}")
+
+    return TTSResponse(audio=audio_b64)
 
 
 # ============================================================================

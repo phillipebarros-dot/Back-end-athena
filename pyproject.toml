@@ -43,6 +43,8 @@ dependencies = [
     "python-multipart>=0.0.9",
     "cachetools>=5.4",
     "gspread>=6.0",
+    "google-cloud-texttospeech>=2.16",
+    "google-api-python-client>=2.100",
 ]
 
 [project.optional-dependencies]
