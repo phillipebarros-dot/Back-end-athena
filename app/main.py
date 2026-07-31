@@ -25,6 +25,8 @@ import hmac
 import os
 import time
 
+import pydantic
+from google.cloud import bigquery
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -660,7 +662,7 @@ async def get_allowed_domains():
         return {"domains": ["grupoom.com.br", "opusmultipla.com.br"]}
 
 
-class DomainRequest(BaseModel):
+class DomainRequest(pydantic.BaseModel):
     domain: str
 
 
