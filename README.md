@@ -34,7 +34,7 @@ Backend do assistente Athena. Um agente LLM especializado em midia, planejamento
 | MCP | langchain-mcp-adapters | 0.3+ | Conexao com 4 MCP servers |
 | Data Warehouse | Google BigQuery | 3.25+ | Consultas SQL e persistencia |
 | Checkpointer | PostgreSQL (Cloud SQL) | via psycopg3 | Estado do agente entre turnos |
-| TTS | OpenAI TTS | tts-1-hd, voz nova | Sintese de voz (texto para audio) |
+| TTS | OpenAI TTS | tts-1-hd, voz onyx | Sintese de voz masculina (texto para audio) |
 | Export | gspread | 6.0+ | Export nativo Google Sheets |
 | Export | openpyxl | 3.1+ | Export XLSX (Excel) |
 | PDF | pdfplumber | 0.11+ | Upload e extracao de PDFs |

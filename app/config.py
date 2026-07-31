@@ -102,7 +102,7 @@ class TTSConfig:
     """Configuração do Text-to-Speech (OpenAI)."""
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     model: str = os.getenv("TTS_MODEL", "tts-1-hd")
-    voice: str = os.getenv("TTS_VOICE", "nova")
+    voice: str = os.getenv("TTS_VOICE", "onyx")
 
 
 @dataclass(frozen=True)
