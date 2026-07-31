@@ -905,6 +905,76 @@ async def remove_allowed_domain(request: DomainRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# ============================================================================
+# GET/POST /settings/synonyms — Dicionário de sinônimos
+# ============================================================================
+
+@app.get("/settings/synonyms")
+async def get_synonyms():
+    """Retorna dicionário de sinônimos armazenado no BigQuery."""
+    try:
+        data_client = bigquery.Client(project=settings.bq.project_persistence)
+        table = f"`{settings.bq.project_persistence}.{settings.bq.dataset_persistence}.athena_settings`"
+        sql = f"""
+            SELECT domain as term_from, setting_value as term_to
+            FROM {table}
+            WHERE setting_key = 'synonym'
+            ORDER BY domain
+        """
+        result = data_client.query(sql, timeout=15).result(timeout=15)
+        synonyms = [{"from": row["term_from"], "to": row["term_to"]} for row in result]
+        return {"synonyms": synonyms}
+    except Exception:
+        return {"synonyms": []}
+
+
+@app.post("/settings/synonyms/add")
+async def add_synonym(request: Request):
+    """Adiciona sinônimo ao dicionário."""
+    body = await request.json()
+    term_from = body.get("term_from", "").strip().lower()
+    term_to = body.get("term_to", "").strip()
+    if not term_from or not term_to:
+        raise HTTPException(status_code=400, detail="term_from e term_to obrigatórios")
+    try:
+        data_client = bigquery.Client(project=settings.bq.project_persistence)
+        table = f"`{settings.bq.project_persistence}.{settings.bq.dataset_persistence}.athena_settings`"
+        sql = f"""
+            INSERT INTO {table} (setting_key, domain, setting_value, created_at)
+            VALUES ('synonym', @term_from, @term_to, CURRENT_TIMESTAMP())
+        """
+        data_client.query(sql, job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("term_from", "STRING", term_from),
+                bigquery.ScalarQueryParameter("term_to", "STRING", term_to),
+            ]
+        ), timeout=15).result(timeout=15)
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/settings/synonyms/remove")
+async def remove_synonym(request: Request):
+    """Remove sinônimo do dicionário."""
+    body = await request.json()
+    term_from = body.get("term_from", "").strip().lower()
+    if not term_from:
+        raise HTTPException(status_code=400, detail="term_from obrigatório")
+    try:
+        data_client = bigquery.Client(project=settings.bq.project_persistence)
+        table = f"`{settings.bq.project_persistence}.{settings.bq.dataset_persistence}.athena_settings`"
+        sql = f"""
+            DELETE FROM {table}
+            WHERE setting_key = 'synonym' AND domain = @term_from
+        """
+        data_client.query(sql, job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("term_from", "STRING", term_from)]
+        ), timeout=15).result(timeout=15)
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ============================================================================
 # Entrypoint
