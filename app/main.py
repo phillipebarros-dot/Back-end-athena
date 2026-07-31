@@ -508,21 +508,26 @@ def _get_mcp_health() -> dict:
     ]
     results = []
     for name, url in mcp_servers:
-        if not url:
+        if not url or not url.startswith("http"):
             results.append({"name": name, "status": "not_configured", "code": 0})
             continue
         try:
-            # MCP endpoints terminam em /mcp, o health fica na raiz do serviço
-            base_url = url.replace("/mcp", "").rstrip("/")
+            # Strip trailing /mcp path only (keep hostname intact)
+            if url.endswith("/mcp"):
+                health_url = url[:-4] + "/health"
+            else:
+                health_url = url.rstrip("/") + "/health"
             headers = {}
             if settings.mcp.auth_token:
                 headers["Authorization"] = f"Bearer {settings.mcp.auth_token}"
-            r = httpx.get(f"{base_url}/health", timeout=8, headers=headers)
+            logging.info(f"MCP health check: {name} -> {health_url}")
+            r = httpx.get(health_url, timeout=8, headers=headers)
             if r.status_code == 200:
                 results.append({"name": name, "status": "ok", "code": 200})
             elif r.status_code == 404:
-                # Sem /health → tenta GET na raiz como fallback
-                r2 = httpx.get(base_url, timeout=5, headers=headers)
+                # Sem /health -> assume ok se não for 5xx
+                base = health_url.rsplit("/health", 1)[0]
+                r2 = httpx.get(base, timeout=5, headers=headers)
                 results.append({"name": name, "status": "ok" if r2.status_code < 500 else "error", "code": r2.status_code})
             else:
                 results.append({"name": name, "status": "error", "code": r.status_code})
