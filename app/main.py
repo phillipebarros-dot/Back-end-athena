@@ -998,14 +998,14 @@ async def remove_synonym(request: Request):
 # ============================================================================
 
 @app.post("/upload")
-async def upload_document(request: Request, file: UploadFile = File(...)):
+async def upload_document(file: UploadFile = File(...)):
     """Recebe PDF ou Excel, extrai texto e tabelas, retorna conteudo estruturado.
 
     Usado para: propostas de veiculos, planilhas de entrega, tabelas de custo.
     Limite: 10MB.
     Formatos: PDF, XLSX, XLS, CSV.
     """
-    _verify_auth(request)
+    # Auth ja validada pelo middleware global (Bearer token)
 
     if not file.filename:
         raise HTTPException(status_code=400, detail="Nenhum arquivo enviado.")
