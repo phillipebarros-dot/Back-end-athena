@@ -455,6 +455,67 @@ async def feedback(request: FeedbackRequest):
 
 
 # ============================================================================
+# Audit helper functions
+# ============================================================================
+
+def _get_system_stats(bq) -> dict:
+    """Métricas de sistema: latência, custo estimado, taxa sem resultado, tokens."""
+    try:
+        sql = f"""
+            WITH stats AS (
+                SELECT
+                    COUNT(*) as total_msgs,
+                    COUNTIF(role = 'assistant' AND (content IS NULL OR TRIM(content) = '' OR content LIKE '%não encontr%' OR content LIKE '%não conseg%')) as no_result_count,
+                    AVG(TIMESTAMP_DIFF(
+                        LEAD(timestamp) OVER (PARTITION BY conversation_id ORDER BY timestamp),
+                        timestamp, SECOND
+                    )) as avg_latency_sec
+                FROM `{settings.bq.project_persistence}.{settings.bq.dataset_persistence}.athena_messages`
+                WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+                    AND role IN ('user', 'assistant')
+            )
+            SELECT
+                total_msgs,
+                no_result_count,
+                SAFE_DIVIDE(no_result_count, NULLIF(total_msgs, 0)) * 100 as no_result_pct,
+                COALESCE(avg_latency_sec, 0) as avg_latency_sec
+            FROM stats
+        """
+        result = bq._client_persistence.query(sql, timeout=15)
+        rows = [dict(r) for r in result.result(timeout=15)]
+        row = rows[0] if rows else {}
+        return {
+            "total_messages_30d": int(row.get("total_msgs", 0)),
+            "no_result_count": int(row.get("no_result_count", 0)),
+            "no_result_pct": round(float(row.get("no_result_pct", 0)), 1),
+            "avg_latency_sec": round(float(row.get("avg_latency_sec", 0)), 1),
+            "estimated_cost_month_usd": round(float(row.get("total_msgs", 0)) * 0.008, 2),
+            "model": os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
+        }
+    except Exception as e:
+        logger.warning("Falha ao obter system_stats: %s", e)
+        return {"error": str(e)}
+
+
+def _get_mcp_health() -> dict:
+    """Verifica saúde dos servidores MCP configurados."""
+    import httpx
+    mcp_url = os.getenv("MCP_SERVER_URL", "")
+    results = []
+    mcp_names = ["publi_consulta", "pesquisas_kantar", "exportar_sheets", "digital"]
+    for name in mcp_names:
+        try:
+            if mcp_url:
+                r = httpx.get(f"{mcp_url.rstrip('/')}/health", timeout=5)
+                results.append({"name": name, "status": "ok" if r.status_code == 200 else "error", "code": r.status_code})
+            else:
+                results.append({"name": name, "status": "not_configured", "code": 0})
+        except Exception as e:
+            results.append({"name": name, "status": "unreachable", "error": str(e)})
+    return {"servers": results}
+
+
+# ============================================================================
 # POST /audit — Substitui o Webhook Auditoria do n8n (5 nodes)
 # ============================================================================
 
@@ -496,8 +557,14 @@ async def audit(request: AuditRequest):
         if not request.conversation_id:
             raise HTTPException(status_code=400, detail="conversation_id obrigatório.")
         data = bq.audit_conversation_messages(request.conversation_id)
+    elif query == "system_stats":
+        # Admin: latência, custo, sem resultado, tokens
+        data = _get_system_stats(bq)
+    elif query == "mcp_health":
+        # Admin: saúde dos servidores MCP
+        data = _get_mcp_health()
     else:
-        data = {"message": f"Query '{query}' não suportada. Use: kpis, recent_activity, recent_feedback, top_users, all_conversations, conversation_messages."}
+        data = {"message": f"Query '{query}' não suportada. Use: kpis, recent_activity, recent_feedback, top_users, all_conversations, conversation_messages, system_stats, mcp_health."}
 
     return {"query": query, "data": data}
 
