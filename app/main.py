@@ -500,16 +500,32 @@ def _get_system_stats(bq) -> dict:
 def _get_mcp_health() -> dict:
     """Verifica saúde dos servidores MCP configurados."""
     import httpx
-    mcp_url = os.getenv("MCP_SERVER_URL", "")
+    mcp_servers = [
+        ("publi_consulta", settings.mcp.publi_url),
+        ("pesquisas_kantar", settings.mcp.pesquisas_url),
+        ("exportar_sheets", settings.mcp.export_url),
+        ("digital", settings.mcp.midia_online_url),
+    ]
     results = []
-    mcp_names = ["publi_consulta", "pesquisas_kantar", "exportar_sheets", "digital"]
-    for name in mcp_names:
+    for name, url in mcp_servers:
+        if not url:
+            results.append({"name": name, "status": "not_configured", "code": 0})
+            continue
         try:
-            if mcp_url:
-                r = httpx.get(f"{mcp_url.rstrip('/')}/health", timeout=5)
-                results.append({"name": name, "status": "ok" if r.status_code == 200 else "error", "code": r.status_code})
+            # MCP endpoints terminam em /mcp, o health fica na raiz do serviço
+            base_url = url.replace("/mcp", "").rstrip("/")
+            headers = {}
+            if settings.mcp.auth_token:
+                headers["Authorization"] = f"Bearer {settings.mcp.auth_token}"
+            r = httpx.get(f"{base_url}/health", timeout=8, headers=headers)
+            if r.status_code == 200:
+                results.append({"name": name, "status": "ok", "code": 200})
+            elif r.status_code == 404:
+                # Sem /health → tenta GET na raiz como fallback
+                r2 = httpx.get(base_url, timeout=5, headers=headers)
+                results.append({"name": name, "status": "ok" if r2.status_code < 500 else "error", "code": r2.status_code})
             else:
-                results.append({"name": name, "status": "not_configured", "code": 0})
+                results.append({"name": name, "status": "error", "code": r.status_code})
         except Exception as e:
             results.append({"name": name, "status": "unreachable", "error": str(e)})
     return {"servers": results}
