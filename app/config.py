@@ -113,7 +113,7 @@ class SecurityConfig:
         for e in os.getenv(
             "ADMIN_EMAILS",
             "andrei@grupoom.com.br,phillipe.barros@grupoom.com.br,"
-            "camilo.ferreira@grupoom.com.br,gabriel.oliveira@grupoom.com.br",
+            "camilo.ferreira@grupoom.com.br",
         ).split(",")
         if e.strip()
     ])
