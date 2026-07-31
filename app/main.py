@@ -54,6 +54,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================================
+# Lifespan — inicialização de recursos no startup (FIX C2)
+# ============================================================================
+
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI):
+    """Startup: inicializa checkpointer Postgres (cria tabelas se necessário).
+
+    FIX C2: AsyncPostgresSaver precisa de setup() para criar as tabelas
+    de checkpoint. Sem isso, a primeira leitura/escrita estoura UndefinedTable.
+    """
+    from app.agent.graph import initialize_checkpointer
+    await initialize_checkpointer()
+    logger.info("Lifespan startup completo.")
+    yield
+    logger.info("Lifespan shutdown.")
+
+
+# ============================================================================
 # App
 # ============================================================================
 
@@ -63,6 +84,7 @@ app = FastAPI(
     version="3.0.0",
     docs_url="/docs" if settings.debug else None,  # Swagger só em dev
     redoc_url=None,
+    lifespan=lifespan,  # FIX C2: inicializa checkpointer no startup
 )
 
 @app.exception_handler(Exception)
@@ -261,8 +283,14 @@ async def chat(request: ChatRequest):
     except Exception as e:
         logger.error("Erro no chat: %s", e, exc_info=True)
         latency_ms = int((time.time() - start_time) * 1000)
+        # FIX C4: em debug, mostra o detalhe do erro em vez de mensagem genérica
+        error_detail = (
+            f"Erro interno ({type(e).__name__}): {e}"
+            if settings.debug
+            else "Desculpe, ocorreu um erro ao processar sua consulta. Tente novamente."
+        )
         return ChatResponse(
-            output="Desculpe, ocorreu um erro ao processar sua consulta. Tente novamente.",
+            output=error_detail,
             conversation_id=request.conversation_id,
             latency_ms=latency_ms,
         )

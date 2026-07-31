@@ -60,9 +60,10 @@ def validate_response(output: str) -> dict[str, Any]:
     # 2. Remove emojis
     output = _EMOJI_PATTERN.sub("", output)
 
-    # 3. Remove travessões duplos
-    output = output.replace(" -- ", ". ")
-    output = output.replace("--", " ")
+    # 3. Remove travessões estilísticos (isolados ou em-dash)
+    #    Preserva -- dentro de ranges, SQL comments, tabelas ASCII
+    output = re.sub(r'(?<=\s)--(?=\s)', '.', output)   # " -- " isolado → "."
+    output = output.replace('\u2014', ' \u2014 ')                  # em-dash: normaliza espaçamento
 
     # 4. Corrige formato monetário
     output = _MONEY_WRONG_FORMAT.sub(r"R$ \1.\2,\3", output)

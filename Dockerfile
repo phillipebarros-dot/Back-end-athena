@@ -32,5 +32,7 @@ EXPOSE 8080
 
 USER athena
 
-# Uvicorn com workers para producao
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "2"]
+# FIX C3: --workers 1 até Postgres checkpointer estar 100%.
+# Com MemorySaver fallback, --workers 2 fragmenta a memória entre processos.
+# Quando Postgres estiver confirmado (C2 resolvido + Cloud SQL anexado), voltar para --workers 2.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]

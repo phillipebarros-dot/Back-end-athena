@@ -16,6 +16,7 @@ MCP Integration:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -64,40 +65,70 @@ def _build_summarizer_llm() -> ChatAnthropic:
 # Checkpointer
 # ============================================================================
 
-def _build_checkpointer():
-    """Cria o checkpointer para persistência de state.
+# Estado global do checkpointer — inicializado pelo lifespan (main.py)
+_checkpointer = None
+_checkpointer_pool = None
 
-    Em PRODUÇÃO: usa AsyncPostgresSaver com Cloud SQL.
-    Em DEV: usa MemorySaver (in-memory, não persiste entre restarts).
 
-    Equivale ao node "Memoria da Conversa" do n8n
-    (tipo: @n8n/n8n-nodes-langchain.memoryBufferWindow, buffer de 10 msgs).
-    DIFERENÇA: LangGraph persiste state real, não buffer fixo.
+async def initialize_checkpointer():
+    """Inicializa o checkpointer Postgres (pool + tabelas).
+
+    Chamado UMA VEZ pelo lifespan do FastAPI no startup.
+    Se Postgres não estiver disponível, cai para MemorySaver.
+
+    FIX C2: AsyncPostgresSaver.setup() cria as tabelas checkpoints/
+    checkpoint_blobs/checkpoint_writes. Sem isso, a primeira leitura
+    estoura UndefinedTable.
+
+    FIX M3: pool criado com open=False, depois await pool.open()
+    (evita DeprecationWarning em psycopg3 async).
     """
-    if settings.persistence.postgres_uri:
-        try:
-            from psycopg_pool import AsyncConnectionPool
-            from psycopg.rows import dict_row
-            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    global _checkpointer, _checkpointer_pool
 
-            pool = AsyncConnectionPool(
-                conninfo=settings.persistence.postgres_uri,
-                kwargs={"autocommit": True, "row_factory": dict_row},
-                open=True,
-            )
-            checkpointer = AsyncPostgresSaver(pool)
-            logger.info("Usando AsyncPostgresSaver (PostgreSQL). State PERSISTE entre restarts.")
-            return checkpointer
-        except ImportError:
-            logger.warning(
-                "langgraph-checkpoint-postgres não instalado. "
-                "Instale com: pip install langgraph-checkpoint-postgres"
-            )
-        except Exception as e:
-            logger.error("Erro ao conectar PostgreSQL: %s. Caindo para MemorySaver.", e)
+    if not settings.persistence.postgres_uri:
+        logger.info("POSTGRES_URI não configurado. Usando MemorySaver (dev/teste). State NÃO persiste entre restarts.")
+        _checkpointer = MemorySaver()
+        return
 
-    logger.info("Usando MemorySaver (dev/teste). State NÃO persiste entre restarts.")
-    return MemorySaver()
+    try:
+        from psycopg_pool import AsyncConnectionPool
+        from psycopg.rows import dict_row
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+        pool = AsyncConnectionPool(
+            conninfo=settings.persistence.postgres_uri,
+            kwargs={"autocommit": True, "row_factory": dict_row},
+            open=False,  # FIX M3: não abrir no construtor
+        )
+        await pool.open()  # Abre dentro do event loop
+        _checkpointer_pool = pool
+
+        checkpointer = AsyncPostgresSaver(pool)
+        await checkpointer.setup()  # FIX C2: cria tabelas se não existirem
+
+        _checkpointer = checkpointer
+        logger.info("Checkpointer PostgreSQL inicializado com sucesso. State PERSISTE entre restarts.")
+
+    except ImportError:
+        logger.warning(
+            "langgraph-checkpoint-postgres não instalado. "
+            "Instale com: pip install langgraph-checkpoint-postgres"
+        )
+        _checkpointer = MemorySaver()
+    except Exception as e:
+        logger.error(
+            "Erro ao inicializar checkpointer PostgreSQL: %s. Caindo para MemorySaver.", e,
+            exc_info=True,
+        )
+        _checkpointer = MemorySaver()
+
+
+def _get_checkpointer():
+    """Retorna o checkpointer inicializado (Postgres ou MemorySaver fallback)."""
+    if _checkpointer is None:
+        logger.warning("Checkpointer não inicializado — lifespan não rodou? Usando MemorySaver.")
+        return MemorySaver()
+    return _checkpointer
 
 
 # ============================================================================
@@ -167,10 +198,42 @@ async def _load_mcp_tools() -> list:
             "langchain-mcp-adapters não instalado. "
             "Instale com: pip install langchain-mcp-adapters"
         )
-        return []
+        raise  # FIX C1: não engolir — deixar o chamador fazer fallback
     except Exception as e:
         logger.error("Erro ao carregar MCP tools: %s", e, exc_info=True)
-        return []
+        raise  # FIX C1: não engolir — deixar o chamador fazer fallback
+
+
+# ============================================================================
+# MCP Fallback (FIX C1)
+# ============================================================================
+
+async def _load_tools_with_fallback() -> list:
+    """Carrega MCP tools; se falhar, cai para legacy tools locais.
+
+    FIX C1: o antigo _load_mcp_tools() engolia exceções e retornava [].
+    Resultado: agente sem nenhuma tool → alucinava dados.
+    Agora: tenta MCP → se falhar, ativa as 14 tools locais BigQuery.
+    """
+    try:
+        mcp_tools = await _load_mcp_tools()
+        if mcp_tools:
+            return mcp_tools
+        logger.warning(
+            "MCP retornou 0 tools. Ativando fallback para tools locais (BigQuery direto)."
+        )
+    except Exception as e:
+        logger.warning(
+            "MCP indisponível (%s). Ativando fallback para tools locais (BigQuery direto).", e
+        )
+
+    from app.agent.tools import get_legacy_tools
+    legacy = get_legacy_tools()
+    if legacy:
+        logger.info("Fallback ativo: %d tools locais carregadas.", len(legacy))
+    else:
+        logger.critical("NENHUMA tool disponível (MCP + legacy). Agente vai operar sem dados.")
+    return legacy
 
 
 # ============================================================================
@@ -189,21 +252,26 @@ async def build_agent(
     Em LangGraph, tudo isso é um GRAFO com state management.
 
     Args:
-        local_tools: Tools locais (BigQuery + validadores). Se None, usa lista vazia.
+        local_tools: Tools locais extras. Se None, usa lista vazia.
         cliente: Cliente ativo para renderizar o system prompt dinâmico.
 
     Returns:
         CompiledGraph — o agente compilado, pronto para .ainvoke() ou .astream().
     """
     llm = _build_llm()
-    checkpointer = _build_checkpointer()
+    checkpointer = _get_checkpointer()  # FIX C2: usa checkpointer já inicializado
     system_prompt = get_prompt_for_client(cliente)
 
-    # Combina tools locais (BigQuery, validadores) + tools MCP (Camilo)
+    # Combina tools locais extras + tools MCP (com fallback para legacy)
     all_tools = list(local_tools or [])
 
-    mcp_tools = await _load_mcp_tools()
-    all_tools.extend(mcp_tools)
+    data_tools = await _load_tools_with_fallback()  # FIX C1: fallback
+    all_tools.extend(data_tools)
+
+    if not all_tools:
+        logger.critical(
+            "Agente criado com ZERO tools. Todas as consultas a dados vão falhar."
+        )
 
     agent = create_react_agent(
         model=llm,
@@ -213,12 +281,11 @@ async def build_agent(
     )
 
     logger.info(
-        "Agente LangGraph criado: model=%s, tools_local=%d, tools_mcp=%d, total=%d, cliente=%s",
+        "Agente LangGraph criado: model=%s, tools=%d, cliente=%s, checkpointer=%s",
         settings.llm.model_main,
-        len(local_tools or []),
-        len(mcp_tools),
         len(all_tools),
         cliente or "multi-cliente",
+        type(checkpointer).__name__,
     )
 
     return agent
@@ -234,8 +301,6 @@ async def build_agent(
 #
 # Agora: um agente por cliente, protegido por asyncio.Lock.
 # ============================================================================
-
-import asyncio
 
 _agent_cache: dict[str, Any] = {}  # cliente → agente compilado
 _agent_lock = asyncio.Lock()
