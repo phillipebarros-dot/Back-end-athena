@@ -640,6 +640,58 @@ async def users(request: Request):
 
 
 # ============================================================================
+# POST /search-entities — Autocomplete de entidades (veículo, programa, praça)
+# ============================================================================
+
+class EntitySearchRequest(pydantic.BaseModel):
+    query: str
+    entity_type: str = "all"  # veiculo, programa, praca, plano, all
+
+@app.post("/search-entities")
+async def search_entities(request: EntitySearchRequest):
+    """Busca entidades para autocomplete no input do chat."""
+    from app.services.bq_service import get_bq_service
+    bq = get_bq_service()
+    q = request.query.strip().upper()
+    if len(q) < 2:
+        return {"results": []}
+
+    results = []
+    data_table = f"`{settings.bq.project_id}.{settings.bq.dataset_media}.pi01`"
+
+    type_map = {
+        "veiculo": ("veiculo", "Veículo"),
+        "programa": ("programa", "Programa"),
+        "praca": ("praca", "Praça"),
+        "plano": ("plano_midia", "Plano"),
+    }
+
+    types_to_search = type_map if request.entity_type == "all" else {request.entity_type: type_map.get(request.entity_type, (request.entity_type, request.entity_type))}
+
+    try:
+        data_client = bigquery.Client(project=settings.bq.project_id)
+        for etype, (col, label) in types_to_search.items():
+            sql = f"""
+                SELECT DISTINCT UPPER({col}) as name
+                FROM {data_table}
+                WHERE {col} IS NOT NULL AND UPPER({col}) LIKE @q
+                ORDER BY name
+                LIMIT 10
+            """
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[bigquery.ScalarQueryParameter("q", "STRING", f"%{q}%")]
+            )
+            result = data_client.query(sql, job_config=job_config, timeout=10)
+            for row in result.result(timeout=10):
+                if row["name"]:
+                    results.append({"name": row["name"], "type": etype, "label": label})
+    except Exception as e:
+        logger.warning("Falha em search-entities: %s", e)
+
+    return {"results": results[:30]}
+
+
+# ============================================================================
 # GET /list-clients — Lista clientes disponíveis para o selector do front
 # ============================================================================
 
@@ -690,17 +742,83 @@ async def tts(request: TTSRequest):
 # ============================================================================
 
 @app.post("/export")
-async def export(request: ExportRequest):
-    """Exporta dados para Google Sheets ou CSV.
+async def export_data(request: ExportRequest):
+    """Exporta dados para CSV ou XLSX.
 
     Substitui: Webhook Export → Prepare Data → Respond.
-    Usa o MCP export do Camilo (Cloud Run).
+    Retorna arquivo em base64 para download direto pelo front.
     """
-    # TODO: Chamar MCP export via langchain-mcp-adapters
+    import io
+    import csv
+    import base64
+
+    data = request.data
+    if not data:
+        return {"status": "error", "message": "Nenhum dado para exportar."}
+
+    title = request.title or "athena_export"
+    fmt = getattr(request, "format", "csv") or "csv"
+
+    if fmt == "xlsx":
+        try:
+            import openpyxl
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = title[:31]  # Excel limite 31 chars
+
+            # Header
+            if data and isinstance(data[0], dict):
+                headers = list(data[0].keys())
+                ws.append(headers)
+                for row in data:
+                    ws.append([row.get(h, "") for h in headers])
+            else:
+                for row in data:
+                    ws.append(row if isinstance(row, list) else [str(row)])
+
+            # Estilizar header
+            from openpyxl.styles import Font, PatternFill
+            for cell in ws[1]:
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill(start_color="C41E1E", end_color="C41E1E", fill_type="solid")
+
+            # Auto-width
+            for col in ws.columns:
+                max_len = max(len(str(c.value or "")) for c in col)
+                ws.column_dimensions[col[0].column_letter].width = min(max_len + 3, 50)
+
+            buf = io.BytesIO()
+            wb.save(buf)
+            b64 = base64.b64encode(buf.getvalue()).decode()
+            return {
+                "status": "ok",
+                "format": "xlsx",
+                "filename": f"{title}.xlsx",
+                "content_base64": b64,
+                "rows": len(data),
+            }
+        except ImportError:
+            logger.warning("openpyxl não instalado, fallback para CSV")
+            fmt = "csv"
+
+    # CSV fallback
+    buf = io.StringIO()
+    if data and isinstance(data[0], dict):
+        writer = csv.DictWriter(buf, fieldnames=list(data[0].keys()))
+        writer.writeheader()
+        writer.writerows(data)
+    else:
+        writer = csv.writer(buf)
+        for row in data:
+            writer.writerow(row if isinstance(row, list) else [str(row)])
+
+    b64 = base64.b64encode(buf.getvalue().encode("utf-8-sig")).decode()
     return {
-        "status": "pending",
-        "message": "Export via MCP ainda não implementado. Use exportar_sheets via agente.",
-        "rows": len(request.data),
+        "status": "ok",
+        "format": "csv",
+        "filename": f"{title}.csv",
+        "content_base64": b64,
+        "rows": len(data),
     }
 
 
