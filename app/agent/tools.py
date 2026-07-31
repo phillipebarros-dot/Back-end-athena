@@ -578,8 +578,32 @@ def exportar_sheets(titulo: str, dados: str) -> str:
         )
         gc = gspread.authorize(creds)
 
+        # Limpar planilhas antigas (>30 dias) pra liberar espaco no Drive da SA
+        try:
+            from datetime import datetime, timedelta, timezone
+            from googleapiclient.discovery import build
+            drive_service = build("drive", "v3", credentials=creds)
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+            old_files = drive_service.files().list(
+                q=f"name contains 'Athena' and createdTime < '{cutoff}' and mimeType='application/vnd.google-apps.spreadsheet'",
+                fields="files(id,name)",
+                pageSize=100,
+            ).execute().get("files", [])
+            for f in old_files:
+                try:
+                    drive_service.files().delete(fileId=f["id"]).execute()
+                except Exception:
+                    pass
+            if old_files:
+                import logging
+                logging.getLogger(__name__).info(
+                    "Limpeza Drive: removidas %d planilhas antigas", len(old_files)
+                )
+        except Exception:
+            pass  # Nao bloqueia se cleanup falhar
+
         # Criar planilha
-        sh = gc.create(f"Athena — {titulo}")
+        sh = gc.create(f"Athena \u2014 {titulo}")
         ws = sh.sheet1
         ws.update_title(titulo[:100])
 
@@ -610,16 +634,23 @@ def exportar_sheets(titulo: str, dados: str) -> str:
 
         return (
             f"Planilha criada com sucesso!\n"
-            f"Título: {sh.title}\n"
+            f"T\u00edtulo: {sh.title}\n"
             f"Linhas: {len(parsed)}\n"
             f"URL: {sh.url}\n"
             f"Abra no navegador para editar."
         )
 
     except ImportError:
-        return "Erro: gspread não instalado no backend."
+        return "Erro: gspread n\u00e3o instalado no backend."
     except Exception as e:
-        return f"Erro ao criar planilha: {str(e)}"
+        error_msg = str(e)
+        if "storage quota" in error_msg.lower() or "quota" in error_msg.lower():
+            return (
+                "Erro: o armazenamento do Google Drive da conta de servi\u00e7o est\u00e1 cheio. "
+                "Planilhas antigas precisam ser removidas. "
+                "Entre em contato com o administrador para liberar espa\u00e7o no Drive da SA."
+            )
+        return f"Erro ao criar planilha: {error_msg}"
 
 
 # ============================================================================
