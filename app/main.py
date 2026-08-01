@@ -256,13 +256,55 @@ async def chat(request: ChatRequest):
         except Exception as log_err:
             logger.warning("Falha ao registrar log: %s", log_err)
 
-        # TTS inline — Google Cloud TTS (pt-BR nativo) com fallback OpenAI
+        # TTS inline — Gemini TTS > Google Cloud TTS > OpenAI (fallback chain)
         audio_b64 = None
         if request.is_audio:
             tts_text = output[:5000]  # Limita texto para TTS
 
-            # Tentar Google Cloud TTS primeiro (voz pt-BR nativa)
-            if settings.tts.provider == "google":
+            # 1. Gemini TTS (voz ultra-realista com emocoes)
+            if settings.tts.provider == "gemini" or (settings.tts.provider == "google" and audio_b64 is None):
+                if settings.tts.provider == "gemini":
+                    try:
+                        from google import genai
+                        from google.genai import types
+                        import wave
+                        import io
+
+                        client = genai.Client(
+                            vertexai=True,
+                            project=settings.tts.gemini_project,
+                            location=settings.tts.gemini_location,
+                        )
+                        response = client.models.generate_content(
+                            model=settings.tts.gemini_model,
+                            contents=f"Fale em portugues brasileiro, de forma natural e expressiva: {tts_text}",
+                            config=types.GenerateContentConfig(
+                                response_modalities=["AUDIO"],
+                                speech_config=types.SpeechConfig(
+                                    voice_config=types.VoiceConfig(
+                                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                            voice_name=settings.tts.gemini_voice,
+                                        )
+                                    )
+                                ),
+                            ),
+                        )
+                        # Audio retorna como PCM 24kHz 16-bit mono
+                        pcm_data = response.candidates[0].content.parts[0].inline_data.data
+                        # Converter PCM pra WAV em memoria
+                        wav_buffer = io.BytesIO()
+                        with wave.open(wav_buffer, "wb") as wf:
+                            wf.setnchannels(1)
+                            wf.setsampwidth(2)
+                            wf.setframerate(24000)
+                            wf.writeframes(pcm_data)
+                        audio_b64 = base64.b64encode(wav_buffer.getvalue()).decode("utf-8")
+                        logger.info("TTS Gemini (%s/%s) gerado com sucesso", settings.tts.gemini_model, settings.tts.gemini_voice)
+                    except Exception as gemini_err:
+                        logger.warning("Gemini TTS falhou, tentando fallback: %s", gemini_err)
+
+            # 2. Google Cloud TTS (Neural2 pt-BR nativo)
+            if audio_b64 is None and settings.tts.provider in ("google", "gemini"):
                 try:
                     from google.cloud import texttospeech
                     tts_client = texttospeech.TextToSpeechClient()
@@ -283,11 +325,11 @@ async def chat(request: ChatRequest):
                         audio_config=audio_config,
                     )
                     audio_b64 = base64.b64encode(tts_response.audio_content).decode("utf-8")
-                    logger.info("TTS Google Cloud (pt-BR-Neural2-B) gerado com sucesso")
+                    logger.info("TTS Google Cloud (Neural2) gerado com sucesso")
                 except Exception as google_tts_err:
-                    logger.warning("Google TTS falhou, tentando OpenAI: %s", google_tts_err)
+                    logger.warning("Google TTS falhou: %s", google_tts_err)
 
-            # Fallback OpenAI ou provider openai
+            # 3. Fallback OpenAI
             if audio_b64 is None and settings.tts.openai_api_key:
                 try:
                     import openai
@@ -765,7 +807,7 @@ async def list_clients():
 
 @app.post("/tts", response_model=TTSResponse)
 async def tts(request: TTSRequest):
-    """Converte texto em audio. Google Cloud TTS (pt-BR nativo) com fallback OpenAI."""
+    """Converte texto em audio. Gemini TTS > Google Cloud TTS > OpenAI."""
     # Limitar texto a 4000 chars para evitar timeout
     text = request.text[:4000] if request.text else ""
     if not text.strip():
@@ -773,8 +815,47 @@ async def tts(request: TTSRequest):
 
     audio_b64 = None
 
-    # Google Cloud TTS (pt-BR Neural2 nativo)
-    if settings.tts.provider == "google":
+    # 1. Gemini TTS (voz ultra-realista)
+    if settings.tts.provider == "gemini":
+        try:
+            from google import genai
+            from google.genai import types
+            import wave
+            import io
+
+            client = genai.Client(
+                vertexai=True,
+                project=settings.tts.gemini_project,
+                location=settings.tts.gemini_location,
+            )
+            response = client.models.generate_content(
+                model=settings.tts.gemini_model,
+                contents=f"Fale em portugues brasileiro, de forma natural e expressiva: {text}",
+                config=types.GenerateContentConfig(
+                    response_modalities=["AUDIO"],
+                    speech_config=types.SpeechConfig(
+                        voice_config=types.VoiceConfig(
+                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                voice_name=settings.tts.gemini_voice,
+                            )
+                        )
+                    ),
+                ),
+            )
+            pcm_data = response.candidates[0].content.parts[0].inline_data.data
+            wav_buffer = io.BytesIO()
+            with wave.open(wav_buffer, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(24000)
+                wf.writeframes(pcm_data)
+            audio_b64 = base64.b64encode(wav_buffer.getvalue()).decode("utf-8")
+            logger.info("TTS Gemini gerado com sucesso (%d chars)", len(text))
+        except Exception as gemini_err:
+            logger.warning("Gemini TTS falhou: %s", gemini_err)
+
+    # 2. Google Cloud TTS (Neural2 fallback)
+    if audio_b64 is None and settings.tts.provider in ("google", "gemini"):
         try:
             from google.cloud import texttospeech
             tts_client = texttospeech.TextToSpeechClient()
@@ -797,9 +878,9 @@ async def tts(request: TTSRequest):
             audio_b64 = base64.b64encode(tts_response.audio_content).decode("utf-8")
             logger.info("TTS Google Cloud gerado com sucesso (%d chars)", len(text))
         except Exception as google_err:
-            logger.warning("Google TTS falhou, tentando OpenAI: %s", google_err)
+            logger.warning("Google TTS falhou: %s", google_err)
 
-    # Fallback OpenAI
+    # 3. Fallback OpenAI
     if audio_b64 is None:
         if not settings.tts.openai_api_key:
             raise HTTPException(status_code=503, detail="Nenhum provider TTS disponivel.")

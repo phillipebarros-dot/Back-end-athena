@@ -45,6 +45,7 @@ dependencies = [
     "gspread>=6.0",
     "google-cloud-texttospeech>=2.16",
     "google-api-python-client>=2.100",
+    "google-genai>=1.0",
 ]
 
 [project.optional-dependencies]

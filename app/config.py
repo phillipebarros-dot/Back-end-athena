@@ -101,14 +101,20 @@ class PersistenceConfig:
 class TTSConfig:
     """Configuracao do Text-to-Speech.
 
-    provider: 'google' (Neural2 pt-BR nativo) ou 'openai' (fallback).
-    Google Cloud TTS usa ADC do Cloud Run automaticamente.
+    provider: 'gemini' (Gemini TTS ultra-realista), 'google' (Cloud TTS Neural2) ou 'openai' (fallback).
+    Gemini TTS: usa google-genai SDK com Vertex AI ADC.
+    Google Cloud TTS: usa ADC do Cloud Run.
     """
-    provider: str = os.getenv("TTS_PROVIDER", "google")  # 'google' ou 'openai'
+    provider: str = os.getenv("TTS_PROVIDER", "gemini")  # 'gemini', 'google' ou 'openai'
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     model: str = os.getenv("TTS_MODEL", "tts-1-hd")
     voice: str = os.getenv("TTS_VOICE", "onyx")
-    # Google Cloud TTS
+    # Gemini TTS (ultra-realista)
+    gemini_model: str = os.getenv("TTS_GEMINI_MODEL", "gemini-2.5-flash-tts")
+    gemini_voice: str = os.getenv("TTS_GEMINI_VOICE", "Kore")
+    gemini_project: str = os.getenv("GCP_PROJECT", "athenaai-opus")
+    gemini_location: str = os.getenv("GCP_LOCATION", "us-central1")
+    # Google Cloud TTS (Neural2)
     google_voice: str = os.getenv("TTS_GOOGLE_VOICE", "pt-BR-Neural2-B")
     google_language: str = os.getenv("TTS_GOOGLE_LANGUAGE", "pt-BR")
     google_speaking_rate: float = float(os.getenv("TTS_GOOGLE_SPEAKING_RATE", "1.05"))
