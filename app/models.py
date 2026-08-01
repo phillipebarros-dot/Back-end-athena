@@ -143,13 +143,21 @@ def _check_injection(value: str) -> str:
 # ============================================================================
 
 class ChatRequest(BaseModel):
-    """Request para POST /chat — substitui o chatTrigger + Sanitizador do n8n."""
+    """Request para POST /chat — substitui o chatTrigger + Sanitizador do n8n.
+
+    Suporta multimodal (Claude Vision): envie image_base64 ou image_url
+    junto com a mensagem de texto.
+    """
     message: str = Field(..., min_length=1, max_length=4000)
     conversation_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str = Field(default="anonymous")
     user_email: str | None = None
     is_audio: bool = False
     client: str | None = None  # Multi-tenant: "O Boticário" | "Eudora" | ... | "Todos"
+    # Multimodal (Claude Vision) — opcional
+    image_base64: str | None = None  # Imagem em base64 (sem prefixo data:...)
+    image_url: str | None = None     # URL direta da imagem (alternativa ao base64)
+    image_media_type: str = "image/jpeg"  # image/jpeg, image/png, image/gif, image/webp
 
     @field_validator("message")
     @classmethod
@@ -324,11 +332,13 @@ class AuditRequest(BaseModel):
     kpis, recent_activity, recent_feedback, top_users,
     all_conversations, conversation_messages
     """
-    query: str  # kpis | recent_activity | recent_feedback | top_users | all_conversations | conversation_messages
+    query: str  # kpis | recent_activity | recent_feedback | top_users | all_conversations | conversation_messages | resolve_feedback
     user_email: str  # Para validação admin server-side
     conversation_id: str | None = None  # Para conversation_messages
     date_from: str | None = None  # Para all_conversations (YYYY-MM-DD)
     date_to: str | None = None  # Para all_conversations (YYYY-MM-DD)
+    feedback_id: str | None = None  # Para resolve_feedback
+    action: str | None = None  # Para resolve_feedback (create_rule | ignore)
 
 
 # ============================================================================

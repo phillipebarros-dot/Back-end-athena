@@ -23,13 +23,14 @@ import base64
 import logging
 import hmac
 import os
+import json
 import time
 
 import pydantic
 from google.cloud import bigquery
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import traceback
 
 from app.config import settings
@@ -202,9 +203,30 @@ async def chat(request: ChatRequest):
         # Config do thread — identifica a conversa para o checkpointer
         config = {"configurable": {"thread_id": request.conversation_id}}
 
+        # Construir mensagem — multimodal (Claude Vision) quando tem imagem
+        if request.image_base64 or request.image_url:
+            from langchain_core.messages import HumanMessage
+            content_parts = [{"type": "text", "text": request.message}]
+            if request.image_base64:
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{request.image_media_type};base64,{request.image_base64}"
+                    },
+                })
+            elif request.image_url:
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": request.image_url},
+                })
+            user_message = HumanMessage(content=content_parts)
+            logger.info("Chat multimodal: imagem anexada (%s)", request.image_media_type)
+        else:
+            user_message = ("user", request.message)
+
         # Invoca o agente
         result = await agent.ainvoke(
-            {"messages": [("user", request.message)]},
+            {"messages": [user_message]},
             config=config,
         )
 
@@ -256,81 +278,12 @@ async def chat(request: ChatRequest):
         except Exception as log_err:
             logger.warning("Falha ao registrar log: %s", log_err)
 
-        # TTS inline — Gemini TTS > Google Cloud TTS > OpenAI (fallback chain)
+        # TTS inline — OpenAI TTS direto (quando usuario quer audio no chat)
+        # Gemini TTS é APENAS para Saori (endpoint /tts)
         audio_b64 = None
         if request.is_audio:
-            tts_text = output[:5000]  # Limita texto para TTS
-
-            # 1. Gemini TTS (voz ultra-realista com emocoes)
-            if settings.tts.provider == "gemini" or (settings.tts.provider == "google" and audio_b64 is None):
-                if settings.tts.provider == "gemini":
-                    try:
-                        from google import genai
-                        from google.genai import types
-                        import wave
-                        import io
-
-                        client = genai.Client(
-                            vertexai=True,
-                            project=settings.tts.gemini_project,
-                            location=settings.tts.gemini_location,
-                        )
-                        response = client.models.generate_content(
-                            model=settings.tts.gemini_model,
-                            contents=f"Fale em portugues brasileiro, de forma natural e expressiva: {tts_text}",
-                            config=types.GenerateContentConfig(
-                                response_modalities=["AUDIO"],
-                                speech_config=types.SpeechConfig(
-                                    voice_config=types.VoiceConfig(
-                                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                            voice_name=settings.tts.gemini_voice,
-                                        )
-                                    )
-                                ),
-                            ),
-                        )
-                        # Audio retorna como PCM 24kHz 16-bit mono
-                        pcm_data = response.candidates[0].content.parts[0].inline_data.data
-                        # Converter PCM pra WAV em memoria
-                        wav_buffer = io.BytesIO()
-                        with wave.open(wav_buffer, "wb") as wf:
-                            wf.setnchannels(1)
-                            wf.setsampwidth(2)
-                            wf.setframerate(24000)
-                            wf.writeframes(pcm_data)
-                        audio_b64 = base64.b64encode(wav_buffer.getvalue()).decode("utf-8")
-                        logger.info("TTS Gemini (%s/%s) gerado com sucesso", settings.tts.gemini_model, settings.tts.gemini_voice)
-                    except Exception as gemini_err:
-                        logger.warning("Gemini TTS falhou, tentando fallback: %s", gemini_err)
-
-            # 2. Google Cloud TTS (Neural2 pt-BR nativo)
-            if audio_b64 is None and settings.tts.provider in ("google", "gemini"):
-                try:
-                    from google.cloud import texttospeech
-                    tts_client = texttospeech.TextToSpeechClient()
-                    synthesis_input = texttospeech.SynthesisInput(text=tts_text)
-                    voice_params = texttospeech.VoiceSelectionParams(
-                        language_code=settings.tts.google_language,
-                        name=settings.tts.google_voice,
-                        ssml_gender=texttospeech.SsmlVoiceGender.MALE,
-                    )
-                    audio_config = texttospeech.AudioConfig(
-                        audio_encoding=texttospeech.AudioEncoding.MP3,
-                        speaking_rate=settings.tts.google_speaking_rate,
-                        pitch=0.0,
-                    )
-                    tts_response = tts_client.synthesize_speech(
-                        input=synthesis_input,
-                        voice=voice_params,
-                        audio_config=audio_config,
-                    )
-                    audio_b64 = base64.b64encode(tts_response.audio_content).decode("utf-8")
-                    logger.info("TTS Google Cloud (Neural2) gerado com sucesso")
-                except Exception as google_tts_err:
-                    logger.warning("Google TTS falhou: %s", google_tts_err)
-
-            # 3. Fallback OpenAI
-            if audio_b64 is None and settings.tts.openai_api_key:
+            tts_text = output[:5000]
+            if settings.tts.openai_api_key:
                 try:
                     import openai
                     tts_client = openai.OpenAI(api_key=settings.tts.openai_api_key)
@@ -340,9 +293,11 @@ async def chat(request: ChatRequest):
                         input=tts_text,
                     )
                     audio_b64 = base64.b64encode(tts_response.content).decode("utf-8")
-                    logger.info("TTS OpenAI (%s) gerado com sucesso", settings.tts.voice)
+                    logger.info("TTS OpenAI (%s) gerado para chat (%d chars)", settings.tts.voice, len(tts_text))
                 except Exception as tts_err:
-                    logger.warning("Falha no TTS OpenAI: %s", tts_err)
+                    logger.warning("Falha no TTS OpenAI para chat: %s", tts_err)
+            else:
+                logger.warning("TTS solicitado mas OPENAI_API_KEY não configurada")
 
         return ChatResponse(
             output=output,
@@ -369,6 +324,112 @@ async def chat(request: ChatRequest):
             conversation_id=request.conversation_id,
             latency_ms=latency_ms,
         )
+
+
+# ============================================================================
+# POST /chat/stream — SSE Streaming (astream_events v2)
+#
+# Refs:
+#   - Anthropic SSE: platform.claude.com/docs/en/build-with-claude/streaming
+#   - LangGraph: langchain-ai.github.io/langgraph/how-tos/streaming
+#   - Cloud Run: cloud.google.com/run/docs/triggering/https-request#streaming
+# ============================================================================
+
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest, raw_request: Request):
+    """Streaming SSE — tokens em tempo real via LangGraph astream_events v2.
+
+    Protocolo SSE:
+      data: {"t":"tok","c":"texto"}              → Token do LLM
+      data: {"t":"tool","n":"nome","s":"start"}  → Tool call iniciado
+      data: {"t":"tool","n":"nome","s":"end"}    → Tool call finalizado
+      data: {"t":"done","c":"texto_completo","cid":"...","ms":123}  → Fim
+      data: {"t":"err","c":"mensagem"}            → Erro
+    """
+    start_time = time.time()
+
+    async def sse_generator():
+        full_text = ""
+        try:
+            from app.agent.graph import get_agent
+            from app.agent.tools import get_all_tools
+
+            tools = get_all_tools()
+            agent = await get_agent(tools=tools, cliente=request.client)
+            config = {"configurable": {"thread_id": request.conversation_id}}
+
+            # Construir mensagem — multimodal (Claude Vision) quando tem imagem
+            if request.image_base64 or request.image_url:
+                from langchain_core.messages import HumanMessage
+                content_parts = [{"type": "text", "text": request.message}]
+                if request.image_base64:
+                    content_parts.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{request.image_media_type};base64,{request.image_base64}"
+                        },
+                    })
+                elif request.image_url:
+                    content_parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": request.image_url},
+                    })
+                user_message = HumanMessage(content=content_parts)
+            else:
+                user_message = ("user", request.message)
+
+            async for event in agent.astream_events(
+                {"messages": [user_message]},
+                config=config,
+                version="v2",
+            ):
+                kind = event["event"]
+
+                if kind == "on_chat_model_stream":
+                    chunk = event["data"]["chunk"]
+                    content = chunk.content if hasattr(chunk, "content") else ""
+                    if isinstance(content, str) and content:
+                        full_text += content
+                        yield f"data: {json.dumps({'t':'tok','c':content})}\n\n"
+
+                elif kind == "on_tool_start":
+                    name = event.get("name", "unknown")
+                    yield f"data: {json.dumps({'t':'tool','n':name,'s':'start'})}\n\n"
+
+                elif kind == "on_tool_end":
+                    name = event.get("name", "unknown")
+                    yield f"data: {json.dumps({'t':'tool','n':name,'s':'end'})}\n\n"
+
+            latency_ms = int((time.time() - start_time) * 1000)
+
+            # Log no BigQuery
+            try:
+                from app.services.bq_service import get_bq_service
+                bq = get_bq_service()
+                bq.insert_log(
+                    session_id=request.conversation_id,
+                    user_input=request.message,
+                    agent_response=full_text[:2000],
+                    latency_ms=latency_ms,
+                )
+            except Exception as log_err:
+                logger.warning("SSE: falha ao registrar log: %s", log_err)
+
+            yield f"data: {json.dumps({'t':'done','c':full_text,'cid':request.conversation_id,'ms':latency_ms})}\n\n"
+
+        except Exception as e:
+            logger.error("SSE stream error: %s", e, exc_info=True)
+            yield f"data: {json.dumps({'t':'err','c':str(e)[:200]})}\n\n"
+
+    return StreamingResponse(
+        sse_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ============================================================================
@@ -807,7 +868,7 @@ async def list_clients():
 
 @app.post("/tts", response_model=TTSResponse)
 async def tts(request: TTSRequest):
-    """Converte texto em audio. Gemini TTS > Google Cloud TTS > OpenAI."""
+    """TTS para Saori — Gemini TTS (voz feminina ultra-realista) > Google Cloud > OpenAI fallback."""
     # Limitar texto a 4000 chars para evitar timeout
     text = request.text[:4000] if request.text else ""
     if not text.strip():
@@ -863,7 +924,7 @@ async def tts(request: TTSRequest):
             voice_params = texttospeech.VoiceSelectionParams(
                 language_code=settings.tts.google_language,
                 name=settings.tts.google_voice,
-                ssml_gender=texttospeech.SsmlVoiceGender.MALE,
+                ssml_gender=texttospeech.SsmlVoiceGender.FEMALE,
             )
             audio_config = texttospeech.AudioConfig(
                 audio_encoding=texttospeech.AudioEncoding.MP3,

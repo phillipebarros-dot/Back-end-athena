@@ -102,8 +102,9 @@ class TTSConfig:
     """Configuracao do Text-to-Speech.
 
     provider: 'gemini' (Gemini TTS ultra-realista), 'google' (Cloud TTS Neural2) ou 'openai' (fallback).
-    Gemini TTS: usa google-genai SDK com Vertex AI ADC.
-    Google Cloud TTS: usa ADC do Cloud Run.
+    Gemini TTS: usa google-genai SDK com Vertex AI ADC. Voz feminina para Saori.
+    Google Cloud TTS: usa ADC do Cloud Run. Voz feminina Neural2-C.
+    OpenAI TTS: usado no chat quando usuario quer audio.
     """
     provider: str = os.getenv("TTS_PROVIDER", "gemini")  # 'gemini', 'google' ou 'openai'
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
@@ -111,11 +112,11 @@ class TTSConfig:
     voice: str = os.getenv("TTS_VOICE", "onyx")
     # Gemini TTS (ultra-realista)
     gemini_model: str = os.getenv("TTS_GEMINI_MODEL", "gemini-2.5-flash-tts")
-    gemini_voice: str = os.getenv("TTS_GEMINI_VOICE", "Charon")
+    gemini_voice: str = os.getenv("TTS_GEMINI_VOICE", "Aoede")  # Feminina, breezy — para Saori
     gemini_project: str = os.getenv("GCP_PROJECT", "athenaai-opus")
     gemini_location: str = os.getenv("GCP_LOCATION", "us-central1")
     # Google Cloud TTS (Neural2)
-    google_voice: str = os.getenv("TTS_GOOGLE_VOICE", "pt-BR-Neural2-B")
+    google_voice: str = os.getenv("TTS_GOOGLE_VOICE", "pt-BR-Neural2-C")  # Feminina
     google_language: str = os.getenv("TTS_GOOGLE_LANGUAGE", "pt-BR")
     google_speaking_rate: float = float(os.getenv("TTS_GOOGLE_SPEAKING_RATE", "1.05"))
 

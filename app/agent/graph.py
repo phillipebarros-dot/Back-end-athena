@@ -46,6 +46,10 @@ def _build_llm() -> ChatAnthropic:
         model=settings.llm.model_main,
         temperature=settings.llm.temperature_main,
         max_tokens=settings.llm.max_tokens_main,
+        # Prompt caching: system prompts ≥1024 tokens são cacheados por 5 min.
+        # Custo de read: 0.1x do normal (~90% economia).
+        # Ref: platform.claude.com/docs/en/build-with-claude/prompt-caching
+        model_kwargs={"extra_headers": {"anthropic-beta": "prompt-caching-2024-07-31"}},
     )
 
 
@@ -99,7 +103,7 @@ async def initialize_checkpointer():
         # Cloud SQL via IP direto com componentes separados (evita URL encoding)
         from psycopg.conninfo import make_conninfo
         conninfo = make_conninfo(
-            host=os.getenv("CLOUDSQL_HOST", "34.59.118.159"),
+            host=os.getenv("CLOUDSQL_HOST", ""),
             port=int(os.getenv("CLOUDSQL_PORT", "5432")),
             user=p.cloudsql_user,
             password=p.cloudsql_password,

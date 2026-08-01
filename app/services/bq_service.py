@@ -55,6 +55,19 @@ class BigQueryService:
             self._client = bigquery.Client(project=settings.bq.project_id)
         return self._client
 
+    @property
+    def client_persistence(self) -> bigquery.Client:
+        """Client BigQuery para queries de persistência (lazy init).
+
+        IMPORTANTE: O client roda jobs no projeto principal (athenaai-opus)
+        onde a SA tem bigquery.jobUser. As tabelas de persistência em
+        sheetsintegration-451500 são acessadas cross-project via FQN
+        no método _table().
+        """
+        if self._client_persistence is None:
+            self._client_persistence = bigquery.Client(project=settings.bq.project_id)
+        return self._client_persistence
+
     def _table(self, name: str) -> str:
         """Retorna o fully-qualified table ID para persistência."""
         return f"`{settings.bq.project_persistence}.{settings.bq.dataset_persistence}.{name}`"
@@ -195,8 +208,7 @@ class BigQueryService:
         """
         try:
             job_config = bigquery.QueryJobConfig()
-            data_client = bigquery.Client(project=settings.bq.project_id)
-            result = data_client.query(sql, job_config=job_config, timeout=15)
+            result = self.client.query(sql, job_config=job_config, timeout=15)
             rows = [dict(row) for row in result.result(timeout=15)]
             clients = [r["cliente"] for r in rows if r.get("cliente")]
             self._cache_clients[cache_key] = clients
@@ -466,14 +478,74 @@ class BigQueryService:
         """Últimos 10 feedbacks.
 
         Equivale ao Roteador de Auditoria query='recent_feedback'.
+        Tenta incluir resolved_action se a coluna existir; senão, retorna sem.
         """
-        sql = f"""
-            SELECT feedback_id, user_id, rating, user_query, comment, timestamp
-            FROM {self._table(settings.persistence.table_feedback)}
-            ORDER BY timestamp DESC
-            LIMIT 10
+        table = self._table(settings.persistence.table_feedback)
+        try:
+            sql = f"""
+                SELECT feedback_id, user_id, rating, user_query, comment, timestamp,
+                       IFNULL(resolved_action, '') AS resolved_action
+                FROM {table}
+                ORDER BY timestamp DESC
+                LIMIT 10
+            """
+            return self._query(sql)
+        except Exception:
+            # Coluna resolved_action ainda não existe — query sem ela
+            sql = f"""
+                SELECT feedback_id, user_id, rating, user_query, comment, timestamp
+                FROM {table}
+                ORDER BY timestamp DESC
+                LIMIT 10
+            """
+            return self._query(sql)
+
+    def resolve_feedback(self, feedback_id: str, action: str, resolved_by: str = "") -> bool:
+        """Marca feedback como resolvido (create_rule ou ignore).
+
+        Adiciona colunas resolved_action, resolved_by, resolved_at à tabela
+        de feedback se não existirem (schema evolution segura no BigQuery).
         """
-        return self._query(sql)
+        table = self._table(settings.persistence.table_feedback)
+
+        # Garante que as colunas de resolução existam
+        self._ensure_feedback_resolved_columns(table)
+
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            sql = f"""
+                UPDATE {table}
+                SET resolved_action = @action,
+                    resolved_by = @resolved_by,
+                    resolved_at = @resolved_at
+                WHERE feedback_id = @fb_id
+            """
+            params = [
+                bigquery.ScalarQueryParameter("action", "STRING", action),
+                bigquery.ScalarQueryParameter("resolved_by", "STRING", resolved_by),
+                bigquery.ScalarQueryParameter("resolved_at", "STRING", now),
+                bigquery.ScalarQueryParameter("fb_id", "STRING", feedback_id),
+            ]
+            self._execute(sql, params)
+            return True
+        except Exception as e:
+            logger.warning("resolve_feedback falhou (colunas podem não existir): %s", e)
+            return False
+
+    def _ensure_feedback_resolved_columns(self, table: str) -> None:
+        """Adiciona colunas de resolução à tabela de feedback se não existirem."""
+        for col_name, col_type in [
+            ("resolved_action", "STRING"),
+            ("resolved_by", "STRING"),
+            ("resolved_at", "STRING"),
+        ]:
+            try:
+                self.client_persistence.query(
+                    f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col_name} {col_type}",
+                    timeout=10,
+                ).result(timeout=10)
+            except Exception:
+                pass  # Coluna já existe ou permissão — segue
 
     def audit_top_users(self) -> list[dict]:
         """Top 10 users por msgs, com contagem de feedback positivo/negativo.
