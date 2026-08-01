@@ -32,12 +32,12 @@ class BigQueryConfig:
 class LLMConfig:
     """Configuração dos modelos LLM."""
     # Agente principal
-    model_main: str = os.getenv("LLM_MODEL_MAIN", "claude-sonnet-4-6")
+    model_main: str = os.getenv("LLM_MODEL_MAIN", "gpt-4o")
     temperature_main: float = float(os.getenv("LLM_TEMPERATURE_MAIN", "0.15"))
     max_tokens_main: int = int(os.getenv("LLM_MAX_TOKENS_MAIN", "4096"))
 
     # Sumarizador (compactação de memória)
-    model_summarizer: str = os.getenv("LLM_MODEL_SUMMARIZER", "claude-haiku-4-5")
+    model_summarizer: str = os.getenv("LLM_MODEL_SUMMARIZER", "gpt-4o-mini")
     temperature_summarizer: float = float(os.getenv("LLM_TEMPERATURE_SUMMARIZER", "0.1"))
     max_tokens_summarizer: int = int(os.getenv("LLM_MAX_TOKENS_SUMMARIZER", "1024"))
 

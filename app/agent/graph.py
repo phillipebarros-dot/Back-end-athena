@@ -21,7 +21,7 @@ import logging
 import os
 from typing import Any
 
-from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import create_react_agent
@@ -36,30 +36,24 @@ logger = logging.getLogger(__name__)
 # LLM Builders
 # ============================================================================
 
-def _build_llm() -> ChatAnthropic:
-    """Cria a instância do LLM principal (Claude Sonnet).
+def _build_llm() -> ChatOpenAI:
+    """Cria a instância do LLM principal (GPT-4o).
 
-    Equivale ao node "Claude Sonnet LLM" do n8n
-    (tipo: @n8n/n8n-nodes-langchain.lmChatAnthropic).
+    Equivale ao node LLM do n8n, agora usando OpenAI.
     """
-    return ChatAnthropic(
+    return ChatOpenAI(
         model=settings.llm.model_main,
         temperature=settings.llm.temperature_main,
         max_tokens=settings.llm.max_tokens_main,
-        # Prompt caching: system prompts ≥1024 tokens são cacheados por 5 min.
-        # Custo de read: 0.1x do normal (~90% economia).
-        # Ref: platform.claude.com/docs/en/build-with-claude/prompt-caching
-        model_kwargs={"extra_headers": {"anthropic-beta": "prompt-caching-2024-07-31"}},
     )
 
 
-def _build_summarizer_llm() -> ChatAnthropic:
-    """Cria a instância do LLM sumarizador (Claude Haiku).
+def _build_summarizer_llm() -> ChatOpenAI:
+    """Cria a instância do LLM sumarizador (GPT-4o-mini).
 
-    Equivale ao node "Claude Haiku Sumarizador" do n8n.
     Usado para compactação de memória.
     """
-    return ChatAnthropic(
+    return ChatOpenAI(
         model=settings.llm.model_summarizer,
         temperature=settings.llm.temperature_summarizer,
         max_tokens=settings.llm.max_tokens_summarizer,
