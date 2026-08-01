@@ -2,7 +2,7 @@
 
 **Autor**: Phillipe Barros ([@phillipebarros-dot](https://github.com/phillipebarros-dot))  
 **Organizacao**: Opus Multipla / Grupo OM  
-**Versao**: 3.1.0 | **Licenca**: Proprietaria
+**Versao**: 3.2.0 | **Licenca**: Proprietaria
 
 Backend do assistente Athena. Um agente LLM especializado em midia, planejamento de comunicacao e gestao de investimentos publicitarios. Substitui os 7 webhooks do n8n original por uma API FastAPI unificada com agente LangGraph, integracao MCP e persistencia BigQuery/PostgreSQL.
 
@@ -34,7 +34,9 @@ Backend do assistente Athena. Um agente LLM especializado em midia, planejamento
 | MCP | langchain-mcp-adapters | 0.3+ | Conexao com 4 MCP servers |
 | Data Warehouse | Google BigQuery | 3.25+ | Consultas SQL e persistencia |
 | Checkpointer | PostgreSQL (Cloud SQL) | via psycopg3 | Estado do agente entre turnos |
-| TTS | OpenAI TTS | tts-1-hd, voz onyx | Sintese de voz masculina (texto para audio) |
+| TTS Principal | Gemini 2.5 Flash TTS | via google-genai | Voz Charon ultra-realista (masculina grave) |
+| TTS Fallback 1 | Google Cloud Neural2 | pt-BR-Neural2-B | Fallback Neural2 (masculina) |
+| TTS Fallback 2 | OpenAI TTS | tts-1-hd, voz onyx | Ultimo recurso (masculina grave) |
 | Export | gspread | 6.0+ | Export nativo Google Sheets |
 | Export | openpyxl | 3.1+ | Export XLSX (Excel) |
 | PDF | pdfplumber | 0.11+ | Upload e extracao de PDFs |
