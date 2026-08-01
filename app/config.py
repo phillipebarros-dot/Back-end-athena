@@ -111,7 +111,7 @@ class TTSConfig:
     voice: str = os.getenv("TTS_VOICE", "onyx")
     # Gemini TTS (ultra-realista)
     gemini_model: str = os.getenv("TTS_GEMINI_MODEL", "gemini-2.5-flash-tts")
-    gemini_voice: str = os.getenv("TTS_GEMINI_VOICE", "Kore")
+    gemini_voice: str = os.getenv("TTS_GEMINI_VOICE", "Charon")
     gemini_project: str = os.getenv("GCP_PROJECT", "athenaai-opus")
     gemini_location: str = os.getenv("GCP_LOCATION", "us-central1")
     # Google Cloud TTS (Neural2)
