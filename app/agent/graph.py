@@ -98,21 +98,42 @@ async def initialize_checkpointer():
     # Determina conninfo: prioriza componentes individuais (sem encoding)
     conninfo = None
     p = settings.persistence
+    cloudsql_instance = p.cloudsql_instance  # default: db-sql-om:us-central1:pg-grom
 
     if p.cloudsql_user and p.cloudsql_password:
-        # Cloud SQL via IP direto com componentes separados (evita URL encoding)
         from psycopg.conninfo import make_conninfo
-        conninfo = make_conninfo(
-            host=os.getenv("CLOUDSQL_HOST", ""),
-            port=int(os.getenv("CLOUDSQL_PORT", "5432")),
-            user=p.cloudsql_user,
-            password=p.cloudsql_password,
-            dbname=p.cloudsql_db,
-            sslmode=os.getenv("CLOUDSQL_SSLMODE", "require"),
-        )
-        logger.info("Postgres conninfo construído via CLOUDSQL_* vars (host=%s, user=%s, db=%s)",
-                     os.getenv("CLOUDSQL_HOST", "34.59.118.159"), p.cloudsql_user, p.cloudsql_db)
+
+        if cloudsql_instance:
+            # Cloud Run com instância Cloud SQL anexada → socket unix (não TCP)
+            # O Cloud SQL Auth Proxy cria o socket em /cloudsql/<INSTANCE>
+            socket_path = f"/cloudsql/{cloudsql_instance}"
+            conninfo = make_conninfo(
+                host=socket_path,
+                user=p.cloudsql_user,
+                password=p.cloudsql_password,
+                dbname=p.cloudsql_db,
+            )
+            logger.info(
+                "Postgres conninfo via Cloud SQL socket (instance=%s, user=%s, db=%s)",
+                cloudsql_instance, p.cloudsql_user, p.cloudsql_db,
+            )
+        else:
+            # Dev/local: IP direto com SSL
+            conninfo = make_conninfo(
+                host=os.getenv("CLOUDSQL_HOST", ""),
+                port=int(os.getenv("CLOUDSQL_PORT", "5432")),
+                user=p.cloudsql_user,
+                password=p.cloudsql_password,
+                dbname=p.cloudsql_db,
+                sslmode=os.getenv("CLOUDSQL_SSLMODE", "require"),
+            )
+            logger.info(
+                "Postgres conninfo via TCP (host=%s, user=%s, db=%s)",
+                os.getenv("CLOUDSQL_HOST", ""), p.cloudsql_user, p.cloudsql_db,
+            )
     elif p.postgres_uri:
+        # POSTGRES_URI direto — deve usar formato socket se em Cloud Run:
+        # postgresql://user:pass@/dbname?host=/cloudsql/INSTANCE
         conninfo = p.postgres_uri
         logger.info("Postgres conninfo via POSTGRES_URI")
     else:
