@@ -1062,7 +1062,9 @@ async def export_data(request: ExportRequest):
             fmt = "xlsx"
         except Exception as e:
             logger.error(f"Erro ao criar Google Sheet: {e}")
-            return {"status": "error", "message": f"Erro ao criar planilha: {str(e)}"}
+            # Fallback: se Sheets falhar (quota, token expirado, etc), gera XLSX
+            logger.info("Fallback para XLSX apos falha no Sheets")
+            fmt = "xlsx"
 
     if fmt == "xlsx":
         try:
